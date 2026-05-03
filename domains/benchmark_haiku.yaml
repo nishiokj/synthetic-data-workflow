@@ -1,0 +1,302 @@
+domain_id: benchmark_haiku
+dataset_version: poc-2
+
+case_types:
+  - proxy_strong
+  - score_unreliable
+  - weak_diagnostic_pressure
+  - shortcut_leakage
+  - fake_difficulty
+  - ambiguous_success_criteria
+  - low_environment_relevance
+  - redundant_coverage
+
+difficulties: [1, 2, 3, 4, 5]
+scenarios: [nominal, edge, adversarial]
+
+abilities:
+  - constrained_poetic_generation
+  - metaphorical_transfer
+  - non_cliche_imagery
+  - tone_control
+  - revision_sensitivity
+  - semantic_precision
+
+environments:
+  - single_turn_creative_writing
+  - revision_interaction
+
+diagnostic_pressure_types:
+  - forbidden_obvious_imagery
+  - interacting_constraints
+  - emotional_indirection
+  - style_without_explicit_style_words
+  - anti_template
+  - revision_without_flattening
+
+scoring_methods:
+  - rubric
+  - pairwise_preference
+  - hard_checks_plus_rubric
+
+route_codes:
+  - accept
+  - reject_criteria_mismatch
+  - reject_schema
+  - reject_leakage
+  - reject_duplicate
+  - reject_coverage_mismatch
+  - reject_semantic_mismatch
+  - reject_upstream_invariant
+  - retry_infra
+  - retry_parse
+  - retry_provider_empty
+  - drop_retry_exhausted
+  - drop_timeout
+  - drop_policy_ceiling
+
+subcodes:
+  - proxy_strong
+  - weak_proxy_validity
+  - unreliable_score
+  - weak_diagnostic_pressure
+  - shortcut_leakage
+  - vague_scoring_contract
+  - fake_difficulty
+  - irrelevant_environment
+  - ambiguous_success_criteria
+  - overbroad_proxy_claim
+  - missing_known_limits
+  - missing_negative_control
+  - schema_violation
+  - unknown_case_type
+  - unknown_difficulty
+  - unknown_scenario
+  - duplicate_seed
+  - near_duplicate
+  - provider_error
+
+reason_codes:
+  - proxy_strong
+  - weak_proxy_validity
+  - unreliable_score
+  - weak_diagnostic_pressure
+  - shortcut_leakage
+  - vague_scoring_contract
+  - fake_difficulty
+  - irrelevant_environment
+  - ambiguous_success_criteria
+  - overbroad_proxy_claim
+  - missing_known_limits
+  - missing_negative_control
+  - schema_violation
+  - near_duplicate
+
+novelty_threshold: 0.08
+max_plan_retries: 2
+max_generation_retries: 2
+
+deterministic_rules:
+  require_negative_control: true
+  min_proxy_claim_chars: 80
+  min_diagnostic_pressure_items: 2
+  min_leakage_risk_items: 1
+  min_known_limit_items: 1
+
+semantic_rules:
+  - Judge the benchmark candidate as a proxy for an ability, not as a polished writing prompt.
+  - Accept only when score_x is explicit enough to be applied consistently to an agent output.
+  - Accept only when the proxy_claim explains why score_x should indicate ability_z in environment_y.
+  - Reject cases that can be passed by shallow formatting, generic haiku templates, or keyword compliance alone.
+  - Reject fake-hard cases whose difficulty comes from confusing wording rather than meaningful diagnostic pressure.
+  - Reject scoring contracts that over-reward table-stakes checks such as line count while under-specifying taste, intent, or constraint interaction.
+  - Require named leakage risks and known limits; honest uncertainty is part of a benchmark case.
+  - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
+
+general_probe_principles:
+  meaningful_constraint_pressure:
+    definition: >
+      The case forces choices where optimizing one desirable behavior can damage
+      another desirable behavior, so success reveals judgment or capability rather
+      than checklist compliance.
+    test_question: >
+      What must the model balance, and what shallow single-axis strategy would fail?
+    bad_example: >
+      Write a six-line poem and avoid the word hope.
+    good_example: >
+      Write a short poem that evokes hope through concrete preparation for a future
+      action while avoiding explicit emotion words and the obvious morning/sun
+      metaphor family.
+
+  informative_success:
+    definition: >
+      A strong performance should increase our belief that the entity has ability_z
+      in environment_y by a nontrivial amount. Passing should not merely prove that
+      the entity cleared table-stakes instructions.
+    test_question: >
+      If a weak but instruction-following model passed this case, would we be
+      surprised?
+
+  shallow_strategy_resistance:
+    definition: >
+      The case should make obvious shortcuts fail or score poorly.
+    shortcuts:
+      - keyword stuffing
+      - format-only compliance
+      - forbidden-token avoidance without positive evidence
+      - cliché substitution
+      - generic safe output
+      - overfitting to a narrow checklist
+
+  multiple_strong_paths:
+    definition: >
+      The case should allow more than one valid high-quality strategy. It should
+      not require the model to guess one hidden preferred answer style.
+    test_question: >
+      Could two very different excellent outputs both score well for defensible
+      reasons?
+
+  process_revelation:
+    definition: >
+      Where possible, the task or final artifact should expose evidence about how
+      the entity balances constraints, chooses, revises, escalates, or reasons.
+      In creative domains, process may only be inferred from the artifact.
+    test_question: >
+      What behavior in the output would reveal a choice rather than a template?
+
+  ceiling_signal:
+    definition: >
+      The case should include at least one scoring signal that can distinguish
+      competent from excellent performance, not only bad from acceptable performance.
+    test_question: >
+      What would an excellent output do that an adequate output would not?
+
+  explicit_limits:
+    definition: >
+      The case must state what success does not prove and which capability regions
+      remain uncovered.
+    test_question: >
+      What false confidence might this benchmark create if reported without limits?
+
+anti_overfit_policy:
+  - Domain traits are lenses, not complete definitions of excellence.
+  - Do not reward checklist satisfaction alone.
+  - Separate table-stakes disqualifiers from ceiling-level ability signals.
+  - Prefer probes that allow unexpected excellence outside named traits.
+  - Do not turn a creative domain into a mechanical compliance game unless the claimed ability is compliance under creative constraints.
+  - A benchmark can use hard checks as disqualifiers, but hard checks should not be the main evidence of high ability.
+  - Report known limits and uncovered capability regions.
+  - Reject rubrics that would unfairly punish a clearly excellent but unanticipated solution.
+
+quality_gate_rules:
+  - Judge benchmark quality and proxy validity only. Do not reject merely because scoring is subjective, imperfect, or uses human judgment; that belongs to RubricGate.
+  - Accept when the case applies meaningful diagnostic pressure on ability_z in environment_y and weak systems have plausible failure paths.
+  - Accept only when the benchmark includes at least one ceiling signal, not just table-stakes disqualifiers.
+  - Treat domain traits as lenses rather than complete definitions; allow room for unexpected excellence.
+  - Accept when difficulty comes from real capability pressure, interacting constraints, or realistic ambiguity rather than confusing wording.
+  - Accept when leakage risks are specific and materially mitigated by the case design, even if not eliminated.
+  - Reject when success can be achieved by shallow formatting, generic templates, keyword avoidance, or compliance theater without demonstrating ability_z.
+  - Reject when the case mostly detects floor ability while claiming to measure high ability.
+  - Reject when the proxy_claim is overbroad relative to what the case can actually show.
+  - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
+
+rubric_gate_rules:
+  - Judge scoring reliability only. Do not reject because the benchmark is hard, subjective, or imperfect as a proxy; that belongs to QualityGate.
+  - Accept when score_x and scoring_contract are concrete enough for a competent judge to apply with bounded variance.
+  - Accept when negative_controls exercise known failure paths and should be clearly penalized by the scoring contract.
+  - Accept when scoring dimensions name observable output behaviors and include clear credit, penalty, and uncertainty handling.
+  - Accept only when the scoring contract preserves room for unexpected excellence instead of rewarding checklist satisfaction alone.
+  - Require table-stakes checks to be represented as disqualifiers or penalties, not as the main high-score signal.
+  - Reject vibes-only criteria, unbounded rater discretion, missing boundary examples, or scoring contracts that reward the wrong behavior.
+  - Reject when known-bad outputs could receive high scores under the proposed score_x.
+  - Reject when a clearly excellent but unanticipated output would be unfairly punished by the rubric.
+  - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
+
+generator_guidance:
+  goal: >
+    Produce a benchmark case that provides defensible evidence that score_x reliably
+    distinguishes LLMs with and without the target poetic or tonal ability in
+    single-turn creative writing or revision interactions. A committed case is one
+    where a model lacking the ability demonstrably cannot achieve a passing score.
+
+  scoring_contract_bar: >
+    Every scoring dimension must specify the observable difference between a
+    high-scoring and a low-scoring agent output in concrete, rater-applicable terms —
+    not abstract quality labels. "imagery_novelty" is a label. A criterion is:
+    "At least 2 of the poem's images are semantically unexpected given the prompt
+    topic — i.e. they do not appear in the top-15 common metaphors for that topic —
+    AND none of the images are direct synonyms of the forbidden tokens." Each
+    dimension must also have a corresponding entry in scoring_contract.credit
+    (what earns points) and scoring_contract.penalties (what loses them).
+
+  proxy_claim_bar: >
+    proxy_claim must argue WHY score_x discriminates between models with and without
+    ability_z — not restate what the dimensions measure. The argument must identify the
+    specific bottleneck: what step in producing a high-scoring output requires the
+    ability and cannot be bypassed. "This score measures non-cliché imagery" is not a
+    proxy claim. "A model without non_cliche_imagery ability will default to the 10
+    most common metaphors for the topic; the hard-check and rubric penalty structure
+    ensures those outputs cannot exceed 0.4/1.0, separating them from models that
+    generate semantically novel imagery" is a proxy claim.
+
+  diagnostic_pressure_notes: >
+    Real pressure for haiku and short-poem benchmarks requires interacting constraints:
+    two or more rules that together force the target ability. A single forbidden-word
+    list is avoidance pressure only — the model complies by synonym substitution without
+    demonstrating poetic ability. Interacting pressure example: the prompt forbids
+    explicit emotion words AND explicit nature imagery AND requires the poem to evoke a
+    specific named emotion through concrete physical detail. The three constraints
+    together force emotional_indirection and non_cliche_imagery simultaneously; no
+    single constraint can be satisfied by rote substitution.
+
+  common_rejection_patterns:
+    - name: token_avoidance_as_proxy
+      description: >
+        Using a forbidden-word or forbidden-image list as the primary or sole
+        constraint. Any model can comply by synonym substitution or topic pivot
+        without demonstrating constrained_poetic_generation. The score must also
+        require positive evidence of the ability, not only absence of forbidden tokens.
+
+    - name: rubric_names_without_criteria
+      description: >
+        Scoring dimensions named "coherence_and_tone", "abstract_metaphor_quality",
+        or "semantic_precision" without behavioral operationalization. These cannot
+        be applied consistently across raters. Each dimension needs a concrete
+        observable criterion: what a 1.0 output does vs. what a 0.0 output does.
+
+    - name: proxy_claim_restates_dimensions
+      description: >
+        proxy_claim that says "score_x combines constraint_adherence plus
+        imagistic_novelty" instead of arguing why a model lacking the ability
+        cannot achieve a passing score. The claim must identify the bottleneck.
+
+    - name: single_constraint_prompt
+      description: >
+        Prompts with only one meaningful constraint (e.g. "write a haiku about X
+        without using Y"). One constraint does not create interacting pressure;
+        the model can comply by avoidance alone.
+
+    - name: difficulty_from_wording_not_ability
+      description: >
+        Cases that appear hard because the prompt is verbose or the constraints are
+        numerous, but where a model with no poetic ability can still score well by
+        careful reading and mechanical compliance. Difficulty must come from what
+        the ability demands, not from confusing instructions.
+
+output_schema_path: schemas/benchmark_output.schema.json
+
+benchmark_case_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: true
+  required: [prompt]
+  properties:
+    prompt:
+      type: string
+      minLength: 20
+    setup:
+      type: string
+    inputs:
+      type: object
+    environment:
+      type: object

@@ -1,0 +1,161 @@
+# Synthetic Data Pipeline Agents
+
+POC repo for a staged synthetic-data pipeline that creates benchmark cases with
+strong role separation, deterministic routing, structured run logs, and offline
+diversity/quality analysis.
+
+The first shippable target is narrow on purpose:
+
+- Generate one committed JSONL dataset of benchmark cases.
+- Emit one structured Stage Run Log JSONL file per run.
+- Compute offline diversity and quality-proxy metrics over the dataset and log.
+- Preserve the core discipline: producers create, judges classify, the router
+  owns state transitions.
+
+## What This Is
+
+This is a LangGraph-style pipeline with domain-agnostic agent roles and
+domain-specific contracts. The current POC generates benchmark cases where:
+
+```text
+score X on benchmark B should be a strong proxy for ability Z in environment Y
+```
+
+Each committed case carries the benchmark prompt/setup, target ability,
+environment assumptions, scoring contract, proxy claim, diagnostic pressure,
+leakage risks, known limits, coverage tags, and controls.
+
+The repo is organized around a router-owned stage graph:
+
+```mermaid
+flowchart LR
+  START((START)) --> Strategy["Strategy<br/>Strategist"]
+  Strategy -->|"seed batch"| PlanCheck["Batch plan check<br/>deterministic"]
+  PlanCheck -->|"accept"| SelectSeed["Select next seed"]
+  PlanCheck -->|"reject / retry"| Strategy
+  SelectSeed -->|"seed available"| SeedAudit["Seed plan audit<br/>PlanAuditor"]
+  SelectSeed -->|"queue empty"| Strategy
+  SeedAudit -->|"accept"| Generate["Generate sample<br/>SampleGenerator"]
+  SeedAudit -->|"reject seed"| Drop["Archive rejection"]
+  Generate -->|"accept"| DetVal["Deterministic validation"]
+  Generate -->|"retry_*"| Generate
+  DetVal -->|"accept"| QualityGate["Quality gate<br/>benchmark proxy"]
+  DetVal -->|"reject / retry"| Generate
+  QualityGate -->|"accept"| RubricGate["Rubric gate<br/>scoring reliability"]
+  QualityGate -->|"reject / retry"| Generate
+  RubricGate -->|"accept"| Curate["Curate corpus"]
+  RubricGate -->|"reject / retry"| Generate
+  Curate -->|"accept"| Commit["Commit sample"]
+  Curate -->|"reject_duplicate"| Drop
+  Commit -->|"target_n reached"| END((END))
+  Commit -->|"more seeds queued"| SelectSeed
+  Commit -->|"need fresh plan"| Strategy
+  Drop -->|"continue if possible"| SelectSeed
+
+  classDef startEnd fill:#0f766e,stroke:#0f766e,color:#ffffff,stroke-width:2px;
+  classDef llm fill:#eff6ff,stroke:#2563eb,color:#0f172a,stroke-width:2px;
+  classDef det fill:#f0fdf4,stroke:#16a34a,color:#0f172a,stroke-width:2px;
+  classDef router fill:#fff7ed,stroke:#ea580c,color:#0f172a,stroke-width:2px;
+  classDef artifact fill:#f8fafc,stroke:#64748b,color:#0f172a,stroke-width:2px;
+  classDef reject fill:#fff1f2,stroke:#e11d48,color:#0f172a,stroke-width:2px;
+  class START,END startEnd;
+  class Strategy,SeedAudit,Generate,QualityGate,RubricGate llm;
+  class PlanCheck,DetVal,Curate det;
+  class SelectSeed router;
+  class Commit artifact;
+  class Drop reject;
+```
+
+See [docs/BENCHMARK_PROXY_PATCH_PLAN.md](docs/BENCHMARK_PROXY_PATCH_PLAN.md)
+for the benchmark-proxy design notes and
+[docs/PIPELINE_STATE_MACHINE.md](docs/PIPELINE_STATE_MACHINE.md) for the full
+stage and route diagram.
+
+## Core Principles
+
+- Engineered diversity beats emergent diversity.
+- Agents do not manage pipeline state.
+- Judges never create, repair, or rewrite upstream artifacts.
+- Route codes are fixed, inspectable, and used for routing.
+- Stage Run Logs are first-class data, not incidental telemetry.
+- Demo output must come from the pipeline path that will ship.
+
+## Intended Repo Shape
+
+```text
+main.py                  # CLI entrypoint
+pipeline.py              # Pipeline nodes, edges, retry policy
+agents.py                # Agent role implementations
+router.py                # Route table and context policies
+rules.py                 # Deterministic benchmark schema and contract checks
+models.py                # Pydantic artifact and event schemas
+config.py                # CLI/env/domain config resolution
+observability.py         # StageRecord JSONL writer
+analyze.py               # Offline diversity and quality metrics
+
+services/
+  corpus_index.py        # Embeddings and nearest-neighbor novelty checks
+  coverage_ledger.py     # Taxonomy-cell coverage counts
+  validation_ledger.py   # Verdict trail
+  rejection_archive.py   # Rejected artifacts and evidence
+
+domains/
+  benchmark_haiku.yaml   # POC benchmark domain contract
+
+tests/
+  test_router.py
+  test_rules.py
+  test_schemas.py
+  test_pipeline_smoke.py
+```
+
+## Ship Gate
+
+Before sending this repo out, the POC is not considered real unless these all
+pass:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export OPENAI_API_KEY=...
+# optional: export OPENAI_REASONING_EFFORT=medium
+pytest
+python3 main.py --domain domains/benchmark_haiku.yaml --target-stage benchmark --target-n 5 --seed 42 --run-id demo
+python3 analyze.py --run-id demo
+python3 run_report.py demo
+```
+
+The demo must leave inspectable artifacts on disk:
+
+```text
+data/corpus/benchmark/demo.jsonl
+logs/demo/stage_records.jsonl
+logs/demo/validation.jsonl
+logs/demo/rejections.jsonl
+logs/demo/metrics.json
+```
+
+`main.py` refuses to reuse a run id when matching logs or corpus files already
+exist. Use a new `--run-id`, or pass `--overwrite` when you intentionally want
+to replace that run's artifacts.
+
+No checked-in static demo output should be presented as a successful run. The
+demo requires actual API credentials and must make live provider calls for the
+LLM and embedding stages. Test doubles are allowed only inside tests.
+
+## Environment
+
+The live POC uses real provider calls for LLM and embedding stages. You can put
+credentials in `.env` at the repo root:
+
+```text
+OPENAI_API_KEY=sk-...
+```
+
+See `.env.example` for optional model and base URL overrides. Values already
+exported in your shell take precedence over `.env`.
+
+The deterministic tests run without provider credentials. The smoke demo may
+use a tiny target count, but it exercises the same node, route, logging, and
+artifact paths as the full run.

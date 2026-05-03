@@ -1,0 +1,91 @@
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agents import ProviderError
+from cli_graph import create_graph_callback
+from config import build_runtime_config
+from observability import set_event_callback
+from pipeline import PipelineRunner
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the synthetic data pipeline POC.")
+    parser.add_argument("--domain", required=True, help="Path to domain YAML.")
+    parser.add_argument("--target-stage", default="benchmark", choices=["benchmark"])
+    parser.add_argument("--target-n", type=int, default=5)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--provider", default="openai")
+    parser.add_argument("--embedding-model", default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--run-id", default="auto")
+    parser.add_argument("--no-progress", action="store_true", help="Disable compact stdout progress lines.")
+    parser.add_argument("--overwrite", action="store_true", help="Replace existing artifacts for this run id.")
+    args = parser.parse_args()
+
+    run_id = args.run_id
+    if run_id == "auto":
+        run_id = datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S")
+
+    existing = _existing_run_artifacts(run_id)
+    if existing and not args.overwrite:
+        print(f"run id already has artifacts: {run_id}", file=sys.stderr)
+        for path in existing:
+            print(f"  {path}", file=sys.stderr)
+        print("Use a fresh --run-id or pass --overwrite.", file=sys.stderr)
+        return 1
+    if existing and args.overwrite:
+        _clear_run_artifacts(run_id)
+
+    config = build_runtime_config(
+        domain_path=args.domain,
+        target_stage=args.target_stage,
+        target_n=args.target_n,
+        seed=args.seed,
+        run_id=run_id,
+        model=args.model,
+        provider=args.provider,
+        embedding_model=args.embedding_model,
+        console_progress=not args.no_progress,
+    )
+    if config.console_progress:
+        set_event_callback(create_graph_callback(run_id))
+    try:
+        summary = PipelineRunner(config).run()
+    except ProviderError as exc:
+        set_event_callback(None)
+        print(f"provider error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        set_event_callback(None)
+
+    print(f"run_id={summary['run_id']}")
+    print(f"committed={summary['committed']}")
+    print(f"dropped={summary['dropped']}")
+    print(f"corpus=data/corpus/benchmark/{summary['run_id']}.jsonl")
+    print(f"logs=logs/{summary['run_id']}/stage_records.jsonl")
+    return 0 if summary["committed"] >= args.target_n else 1
+
+
+def _existing_run_artifacts(run_id: str) -> list[Path]:
+    paths = [
+        Path("logs") / run_id,
+        Path("data") / "corpus" / "benchmark" / f"{run_id}.jsonl",
+    ]
+    return [path for path in paths if path.exists()]
+
+
+def _clear_run_artifacts(run_id: str) -> None:
+    for path in _existing_run_artifacts(run_id):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
