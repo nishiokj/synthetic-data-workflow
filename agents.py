@@ -70,6 +70,37 @@ class OpenAIClient:
         meta["text_normalization_replacements"] = replacements
         return payload, meta
 
+    def complete_text(self, *, system: str, user: str, temperature: float = 0.7) -> tuple[str, dict[str, Any]]:
+        started = time.perf_counter()
+        body = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if self.config.reasoning_effort and _supports_reasoning_effort(self.config.model):
+            body["reasoning_effort"] = self.config.reasoning_effort
+        if not self.config.model.startswith("gpt-5"):
+            body["temperature"] = temperature
+        response = self._post("/chat/completions", body)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        content = response["choices"][0]["message"]["content"]
+        if not content:
+            raise ProviderError("provider returned empty text content")
+        usage = response.get("usage", {})
+        content, replacements = normalize_text_tree(content)
+        return content, {
+            "provider": self.config.provider,
+            "model": self.config.model,
+            "input_tokens": int(usage.get("prompt_tokens", 0)),
+            "output_tokens": int(usage.get("completion_tokens", 0)),
+            "latency_ms": latency_ms,
+            "cost_usd": 0.0,
+            "reasoning_effort": self.config.reasoning_effort,
+            "text_normalization_replacements": replacements,
+        }
+
     def embed(self, text: str) -> tuple[list[float], dict[str, Any]]:
         started = time.perf_counter()
         response = self._post(
@@ -241,12 +272,42 @@ class PlanAuditor:
 
 _GENERATOR_PRINCIPLES = """
 You are a Benchmark Case Generator. Your output is training data: a benchmark case used to
-evaluate an LLM's ability. Every case you produce will be graded by a stateless adversarial
-judge. Do not claim admission quality. Return JSON only.
+evaluate an LLM's ability. Every case you produce begins as a plausible benchmark
+candidate and must earn promotion into the corpus. Do not claim admission quality.
+Return JSON only.
+
+Your job is not to produce a merely valid benchmark case. Plausible, well-formed,
+or rubric-shaped is not enough. Assume every generated case costs real money,
+evaluation time, and user trust. A useful benchmark candidate should include the
+evidence needed to promote it from plausible to a defensible proxy for ability_z
+in environment_y.
+
+Design the case so a neutral, critical gate can see why it is more than checklist
+compliance. If a weak but careful model could pass by following visible rules,
+making token-level substitutions, adding decorative details, or satisfying
+checklists without showing the target ability, the candidate has not earned
+promotion.
+
+Never leak the answer in candidate-facing material. If the benchmark asks an
+agent to infer, diagnose, judge, repair, or discover something, the prompt,
+inputs, code comments, labels, filenames, visible outputs, fixtures, and setup
+must not reveal or strongly hint at the intended answer. A case that gives away
+its own answer cannot be promoted no matter how strong the rubric looks.
+
+Prefer benchmark designs that create pressure toward excellent outputs, not only
+filters against bad outputs. The case should make a strong model reveal taste,
+judgment, control, strategy, or depth that an adequate model would not show.
+Avoid converging on familiar safe templates. If the first design is a standard
+constraint-following prompt, improve it before returning it by adding meaningful
+tradeoff, transformation, preservation, comparison, revision, or other structure
+that creates ceiling pressure.
 
 Hard checks may disqualify bad outputs, but table-stakes compliance is not the same as
 high ability. A useful benchmark should create evidence about ability, including signals
 that can separate adequate from excellent behavior when the domain supports that.
+
+Return only a case you would be willing to defend as a promoted corpus item under
+its stated assumptions and limits.
 """.strip()
 
 
@@ -471,8 +532,12 @@ class QualityGate(_GateValidator):
     rules_attr = "quality_gate_rules"
     system_prompt = (
         "You are QualityGate for a benchmark-generation pipeline. "
-        "Judge whether the benchmark case is a high-quality proxy for ability_z in environment_y. "
+        "Treat every candidate as merely plausible until its evidence earns promotion into the corpus. "
+        "Judge whether the benchmark case is a useful proxy for ability_z in environment_y. "
         "Focus on diagnostic pressure, proxy validity, difficulty, environment relevance, and leakage mitigation. "
+        "Critique the candidate enough to decide whether the bridge from score_x to ability_z in environment_y actually holds. "
+        "Actively inspect all candidate-facing material for answer leakage: prompts, inputs, code comments, labels, filenames, tests, fixtures, visible outputs, and setup. "
+        "If the benchmark reveals or strongly hints at the intended answer, root cause, fix, or scoring target, reject it even if the rubric is otherwise strong. "
         "Do not reject merely because scoring is subjective or imperfect; RubricGate judges scoring reliability. "
         "Accept imperfect but useful benchmark proxies when their limits are explicit and success would be meaningful evidence of ability. "
         "Return verdict metadata plus a concise public rationale. Do not reveal hidden chain-of-thought. "
@@ -486,8 +551,11 @@ class RubricGate(_GateValidator):
     rules_attr = "rubric_gate_rules"
     system_prompt = (
         "You are RubricGate for a benchmark-generation pipeline. "
+        "Treat the scoring setup as merely plausible until its evidence earns promotion. "
         "Judge whether score_x and scoring_contract are reliable enough to grade outputs for this benchmark case. "
         "Focus on observable criteria, negative controls, boundary handling, judge variance, and whether known-bad outputs are penalized. "
+        "Critique the scoring setup enough to decide whether score_x can be applied consistently and whether high scores would mean what the benchmark claims. "
+        "If candidate-facing materials leak the answer so badly that high scores cannot distinguish true ability from clue-following, reject the scoring setup as unreliable. "
         "Do not reject merely because the benchmark is subjective, hard, or not a perfect proxy; QualityGate judges benchmark quality. "
         "Accept imperfect scoring methods when discretion is bounded enough for the benchmark's stated use. "
         "Return verdict metadata plus a concise public rationale. Do not reveal hidden chain-of-thought. "

@@ -56,6 +56,7 @@ def test_compiled_graph_contains_pipeline_nodes(monkeypatch) -> None:
         "validate_det",
         "quality_gate",
         "rubric_gate",
+        "join_gates",
         "curate",
     }
 

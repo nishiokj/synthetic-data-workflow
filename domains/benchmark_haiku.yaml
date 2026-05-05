@@ -105,8 +105,10 @@ deterministic_rules:
 
 semantic_rules:
   - Judge the benchmark candidate as a proxy for an ability, not as a polished writing prompt.
+  - Treat each candidate as merely plausible until evidence promotes it into a useful benchmark proxy.
   - Accept only when score_x is explicit enough to be applied consistently to an agent output.
   - Accept only when the proxy_claim explains why score_x should indicate ability_z in environment_y.
+  - Criteria are not exhaustive; reject obvious fake compliance, loophole exploitation, or bad-faith literalism even when the exact shortcut is not listed.
   - Reject cases that can be passed by shallow formatting, generic haiku templates, or keyword compliance alone.
   - Reject fake-hard cases whose difficulty comes from confusing wording rather than meaningful diagnostic pressure.
   - Reject scoring contracts that over-reward table-stakes checks such as line count while under-specifying taste, intent, or constraint interaction.
@@ -148,6 +150,26 @@ general_probe_principles:
       - generic safe output
       - overfitting to a narrow checklist
 
+  critical_common_sense:
+    definition: >
+      The written criteria do not need to enumerate every invalid shortcut.
+      A benchmark should rely on competent critical judgment to reject
+      outputs that are plainly gaming, literalizing, or faking compliance
+      with the benchmark's intent, while staying fair to genuinely strong
+      unanticipated solutions.
+    test_question: >
+      Could a weak model get a high score by exploiting wording, making a
+      token-level substitution, adding decorative mentions, or satisfying the
+      checklist while obviously missing the intended capability?
+    bad_example: >
+      A revision benchmark gives high credit when "bridge" is replaced with
+      "archive" once, even though the rest of the poem is unchanged, because
+      the rubric did not explicitly ban that exact shortcut.
+    good_example: >
+      The rubric says that surface compliance is insufficient: any output that
+      satisfies named constraints while obviously failing the intended transfer,
+      revision, or tonal task receives low credit.
+
   multiple_strong_paths:
     definition: >
       The case should allow more than one valid high-quality strategy. It should
@@ -180,6 +202,8 @@ general_probe_principles:
 
 anti_overfit_policy:
   - Domain traits are lenses, not complete definitions of excellence.
+  - Treat each generated case as a plausible candidate that must earn promotion into the corpus through evidence.
+  - Written criteria are not exhaustive; competent judges may and should reject obvious gaming, fake compliance, and bad-faith literalism.
   - Do not reward checklist satisfaction alone.
   - Separate table-stakes disqualifiers from ceiling-level ability signals.
   - Prefer probes that allow unexpected excellence outside named traits.
@@ -190,11 +214,13 @@ anti_overfit_policy:
 
 quality_gate_rules:
   - Judge benchmark quality and proxy validity only. Do not reject merely because scoring is subjective, imperfect, or uses human judgment; that belongs to RubricGate.
+  - Treat the candidate as merely plausible until the candidate itself provides enough evidence to promote it into a useful benchmark proxy.
   - Accept when the case applies meaningful diagnostic pressure on ability_z in environment_y and weak systems have plausible failure paths.
   - Accept only when the benchmark includes at least one ceiling signal, not just table-stakes disqualifiers.
   - Treat domain traits as lenses rather than complete definitions; allow room for unexpected excellence.
   - Accept when difficulty comes from real capability pressure, interacting constraints, or realistic ambiguity rather than confusing wording.
   - Accept when leakage risks are specific and materially mitigated by the case design, even if not eliminated.
+  - Reject when an obvious common-sense loophole would let a weak model pass, even if the exact loophole is not explicitly named in the prompt or rubric.
   - Reject when success can be achieved by shallow formatting, generic templates, keyword avoidance, or compliance theater without demonstrating ability_z.
   - Reject when the case mostly detects floor ability while claiming to measure high ability.
   - Reject when the proxy_claim is overbroad relative to what the case can actually show.
@@ -202,11 +228,14 @@ quality_gate_rules:
 
 rubric_gate_rules:
   - Judge scoring reliability only. Do not reject because the benchmark is hard, subjective, or imperfect as a proxy; that belongs to QualityGate.
+  - Treat the scoring setup as merely plausible until score_x and scoring_contract provide enough evidence to promote it as a reliable grading method.
   - Accept when score_x and scoring_contract are concrete enough for a competent judge to apply with bounded variance.
   - Accept when negative_controls exercise known failure paths and should be clearly penalized by the scoring contract.
   - Accept when scoring dimensions name observable output behaviors and include clear credit, penalty, and uncertainty handling.
   - Accept only when the scoring contract preserves room for unexpected excellence instead of rewarding checklist satisfaction alone.
+  - Accept only when judges are empowered to penalize obvious gaming, bad-faith literalism, and fake compliance that violate the benchmark intent but evade named rules.
   - Require table-stakes checks to be represented as disqualifiers or penalties, not as the main high-score signal.
+  - Reject scoring contracts that treat the written criteria as exhaustive and would give high scores to obvious loophole exploits.
   - Reject vibes-only criteria, unbounded rater discretion, missing boundary examples, or scoring contracts that reward the wrong behavior.
   - Reject when known-bad outputs could receive high scores under the proposed score_x.
   - Reject when a clearly excellent but unanticipated output would be unfairly punished by the rubric.
@@ -218,6 +247,8 @@ generator_guidance:
     distinguishes LLMs with and without the target poetic or tonal ability in
     single-turn creative writing or revision interactions. A committed case is one
     where a model lacking the ability demonstrably cannot achieve a passing score.
+    The output should read as a plausible candidate that carries enough evidence for
+    a neutral gate to promote it, not as a case that merely uses benchmark vocabulary.
 
   scoring_contract_bar: >
     Every scoring dimension must specify the observable difference between a
@@ -228,6 +259,12 @@ generator_guidance:
     AND none of the images are direct synonyms of the forbidden tokens." Each
     dimension must also have a corresponding entry in scoring_contract.credit
     (what earns points) and scoring_contract.penalties (what loses them).
+    The scoring contract must also contain an anti-gaming standard: satisfying
+    surface constraints is insufficient when the output is plainly exploiting a
+    loophole, making token-level substitutions, adding decorative object mentions,
+    or otherwise faking the intended capability. Judges should be able to assign
+    low credit for obvious fake compliance even if that exact exploit was not
+    enumerated in the rubric.
 
   proxy_claim_bar: >
     proxy_claim must argue WHY score_x discriminates between models with and without
@@ -256,6 +293,14 @@ generator_guidance:
         constraint. Any model can comply by synonym substitution or topic pivot
         without demonstrating constrained_poetic_generation. The score must also
         require positive evidence of the ability, not only absence of forbidden tokens.
+
+    - name: criteria_as_exhaustive_loophole_list
+      description: >
+        Treating the rubric as if every invalid shortcut must be explicitly named.
+        This creates easy gaming: the model does a shallow word swap, decorative
+        mention, punctuation hack, or checklist-minimum answer and claims success
+        because the exact move was not forbidden. Benchmarks must allow judges to
+        apply critical common sense and penalize obvious fake compliance.
 
     - name: rubric_names_without_criteria
       description: >

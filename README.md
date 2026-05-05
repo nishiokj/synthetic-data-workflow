@@ -124,6 +124,7 @@ pytest
 python3 main.py --domain domains/benchmark_haiku.yaml --target-stage benchmark --target-n 5 --seed 42 --run-id demo
 python3 analyze.py --run-id demo
 python3 run_report.py demo
+python3 sample_outputs.py demo --limit 1
 ```
 
 The demo must leave inspectable artifacts on disk:
@@ -134,6 +135,7 @@ logs/demo/stage_records.jsonl
 logs/demo/validation.jsonl
 logs/demo/rejections.jsonl
 logs/demo/metrics.json
+data/outputs/demo.jsonl
 ```
 
 `main.py` refuses to reuse a run id when matching logs or corpus files already

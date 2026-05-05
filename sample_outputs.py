@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from agents import OpenAIClient, ProviderError
+from config import ModelConfig, load_env_file
+from models import stable_hash, utc_now_iso
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate model outputs for committed benchmark cases.")
+    parser.add_argument("run_id", help="Corpus run id, e.g. probe-principles-11")
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--output-dir", default="data/outputs")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--provider", default=None)
+    parser.add_argument("--base-url", default=None)
+    parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument("--index", type=int, default=None, help="0-based corpus row to run. Defaults to the last rows.")
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--overwrite", action="store_true", help="Replace output file for this run.")
+    args = parser.parse_args()
+
+    corpus_path = Path(args.data_dir) / "corpus" / "benchmark" / f"{args.run_id}.jsonl"
+    rows = _read_jsonl(corpus_path)
+    if not rows:
+        print(f"no committed benchmark cases found at {corpus_path}", file=sys.stderr)
+        return 1
+
+    selected = _select_rows(rows, index=args.index, limit=args.limit)
+    output_path = Path(args.output_dir) / f"{args.run_id}.jsonl"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() and args.overwrite:
+        output_path.unlink()
+
+    load_env_file()
+    client = OpenAIClient(
+        ModelConfig(
+            provider=args.provider or "openai",
+            model=args.model or "gpt-5-mini",
+            base_url=args.base_url or "https://api.openai.com/v1",
+        )
+    )
+
+    for row_index, item in selected:
+        candidate = item.get("candidate", {})
+        prompt = _prompt(candidate)
+        if not prompt:
+            print(f"row {row_index}: missing candidate.benchmark_case.prompt", file=sys.stderr)
+            continue
+        system = (
+            "You are the model being evaluated by a benchmark. "
+            "Follow the user benchmark prompt exactly. Return only the requested output."
+        )
+        try:
+            output, meta = client.complete_text(system=system, user=prompt, temperature=args.temperature)
+        except ProviderError as exc:
+            print(f"provider error: {exc}", file=sys.stderr)
+            return 2
+
+        record = {
+            "id": stable_hash({"run_id": args.run_id, "row_index": row_index, "output": output}),
+            "run_id": args.run_id,
+            "row_index": row_index,
+            "candidate_id": candidate.get("id"),
+            "ability": (candidate.get("ability_z") or {}).get("name"),
+            "environment": (candidate.get("environment_y") or {}).get("name"),
+            "prompt": prompt,
+            "output": output,
+            "model_metadata": meta,
+            "created_at": utc_now_iso(),
+        }
+        _append_jsonl(output_path, record)
+        _print_output(record)
+
+    print(f"\noutputs={output_path}")
+    return 0
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def _select_rows(rows: list[dict[str, Any]], *, index: int | None, limit: int) -> list[tuple[int, dict[str, Any]]]:
+    if index is not None:
+        if index < 0 or index >= len(rows):
+            raise SystemExit(f"--index out of range; corpus has {len(rows)} row(s)")
+        return [(index, rows[index])]
+    start = max(0, len(rows) - max(1, limit))
+    return list(enumerate(rows[start:], start=start))
+
+
+def _prompt(candidate: dict[str, Any]) -> str:
+    benchmark_case = candidate.get("benchmark_case") if isinstance(candidate.get("benchmark_case"), dict) else {}
+    return str(benchmark_case.get("prompt") or "")
+
+
+def _append_jsonl(path: Path, value: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, sort_keys=True) + "\n")
+
+
+def _print_output(record: dict[str, Any]) -> None:
+    print("=" * 80)
+    print(f"candidate={record.get('candidate_id')}")
+    print(f"ability={record.get('ability')}")
+    print(f"environment={record.get('environment')}")
+    print("-" * 80)
+    print(record["output"])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,387 @@
+domain_id: benchmark_code_debug
+dataset_version: poc-2
+
+case_types:
+  - proxy_strong
+  - score_unreliable
+  - weak_diagnostic_pressure
+  - shortcut_leakage
+  - fake_difficulty
+  - ambiguous_success_criteria
+  - low_environment_relevance
+  - redundant_coverage
+
+difficulties: [1, 2, 3, 4, 5]
+scenarios: [nominal, edge, adversarial]
+
+abilities:
+  - fault_localization
+  - causal_reasoning
+  - minimal_fix_generation
+  - error_pattern_recognition
+  - regression_sensitivity
+  - test_case_awareness
+
+environments:
+  - single_turn_debug_with_test
+  - debug_without_failing_test
+  - explain_then_fix
+
+diagnostic_pressure_types:
+  - misleading_error_message
+  - off_by_one_with_plausible_distractor
+  - multiple_interacting_bugs
+  - correct_code_wrong_invariant
+  - silent_failure
+  - fix_that_regresses
+
+scoring_methods:
+  - rubric
+  - deterministic_execution
+  - hard_checks_plus_rubric
+
+route_codes:
+  - accept
+  - reject_criteria_mismatch
+  - reject_schema
+  - reject_leakage
+  - reject_duplicate
+  - reject_coverage_mismatch
+  - reject_semantic_mismatch
+  - reject_upstream_invariant
+  - retry_infra
+  - retry_parse
+  - retry_provider_empty
+  - drop_retry_exhausted
+  - drop_timeout
+  - drop_policy_ceiling
+
+subcodes:
+  - proxy_strong
+  - weak_proxy_validity
+  - unreliable_score
+  - weak_diagnostic_pressure
+  - shortcut_leakage
+  - vague_scoring_contract
+  - fake_difficulty
+  - irrelevant_environment
+  - ambiguous_success_criteria
+  - overbroad_proxy_claim
+  - missing_known_limits
+  - missing_negative_control
+  - schema_violation
+  - unknown_case_type
+  - unknown_difficulty
+  - unknown_scenario
+  - duplicate_seed
+  - near_duplicate
+  - provider_error
+
+reason_codes:
+  - proxy_strong
+  - weak_proxy_validity
+  - unreliable_score
+  - weak_diagnostic_pressure
+  - shortcut_leakage
+  - vague_scoring_contract
+  - fake_difficulty
+  - irrelevant_environment
+  - ambiguous_success_criteria
+  - overbroad_proxy_claim
+  - missing_known_limits
+  - missing_negative_control
+  - schema_violation
+  - near_duplicate
+
+novelty_threshold: 0.08
+max_plan_retries: 2
+max_generation_retries: 2
+
+deterministic_rules:
+  require_negative_control: true
+  min_proxy_claim_chars: 80
+  min_diagnostic_pressure_items: 2
+  min_leakage_risk_items: 1
+  min_known_limit_items: 1
+
+semantic_rules:
+  - Judge the benchmark candidate as a proxy for a debugging ability, not as a polished programming exercise.
+  - Treat each candidate as merely plausible until evidence promotes it into a useful benchmark proxy.
+  - Accept only when score_x is explicit enough to be applied consistently to an agent output.
+  - Accept only when the proxy_claim explains why score_x should indicate ability_z in environment_y.
+  - Criteria are not exhaustive; reject obvious fake compliance, loophole exploitation, or bad-faith literalism even when the exact shortcut is not listed.
+  - Hard reject any candidate-facing material that reveals, labels, or strongly hints at the intended root cause, faulty line, fix, or scoring answer.
+  - Reject cases that can be passed by traceback reading, surface pattern matching, or mechanical token substitution without demonstrating causal understanding of the fault.
+  - Reject fake-hard cases whose difficulty comes from verbose or obfuscated code rather than meaningful diagnostic pressure.
+  - Reject scoring contracts that over-reward passing the visible failing test without verifying the fix addresses root cause and does not regress orthogonal behavior.
+  - Require named leakage risks and known limits; honest uncertainty is part of a benchmark case.
+  - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
+
+general_probe_principles:
+  meaningful_constraint_pressure:
+    definition: >
+      The case forces the model into a situation where a plausible but wrong diagnostic
+      competes with the correct causal explanation. Success reveals genuine fault
+      localization rather than traceback-following or pattern matching.
+    test_question: >
+      What misleading signal would draw a weak model to the wrong fix, and why does the
+      correct fix require tracing causality rather than responding to that signal?
+    bad_example: >
+      A function raises NameError on line 5 because a variable is misspelled. Any model
+      that reads the traceback can produce the fix.
+    good_example: >
+      A function raises IndexError on line 18 during processing, but the root cause is
+      an off-by-one in the loop bound at line 7 that only manifests when input length
+      is a power of two. The obvious fix — adding a bounds check at line 18 — passes
+      the visible test but fails the regression case.
+
+  informative_success:
+    definition: >
+      A strong performance should increase our belief that the model has ability_z
+      in environment_y by a nontrivial amount. Passing should not merely prove that
+      the model can read a traceback or reproduce a syntactically valid patch.
+    test_question: >
+      If a model that only reads tracebacks and applies the nearest syntactic fix
+      passed this case, would we be surprised?
+
+  shallow_strategy_resistance:
+    definition: >
+      The case should make obvious shortcuts fail or score poorly.
+    shortcuts:
+      - reading a comment, label, fixture name, test name, or prompt phrase that reveals the root cause or intended fix
+      - traceback-line patching without causal reasoning
+      - test-output memorization or overfitting to the visible test
+      - keyword substitution in the error message
+      - generic defensive guard insertion (try/except, bounds check) at the symptom site
+      - restating the error as the explanation
+
+  candidate_facing_answer_hygiene:
+    definition: >
+      The benchmark must not reveal its own answer in any material shown to the evaluated
+      agent. Code comments, variable names, filenames, test names, fixture labels, prompt
+      wording, and visible outputs must preserve the diagnostic situation rather than
+      identify the intended root cause or repair.
+    test_question: >
+      Could the evaluated agent get high credit by quoting or following a candidate-facing
+      clue instead of diagnosing the fault?
+    bad_example: >
+      The provided source contains `idx = 1  # BUG: off-by-one, should start at 0`
+      while the task asks the model to identify the off-by-one root cause.
+    good_example: >
+      The code contains natural comments about intended behavior and a visible failing
+      assertion, but no comment, fixture name, or prompt phrase identifies the faulty
+      expression or desired patch.
+
+  critical_common_sense:
+    definition: >
+      The written criteria do not need to enumerate every invalid shortcut. A benchmark
+      should rely on competent critical judgment to reject outputs that are plainly
+      gaming, pattern-matching, or faking compliance with the benchmark's intent, while
+      staying fair to genuinely strong unanticipated solutions.
+    test_question: >
+      Could a weak model get a high score by patching the error site without understanding
+      why the invariant was violated, adding a try/except that silences the visible test,
+      or reproducing the visible fix from a similar training example?
+    bad_example: >
+      A rubric gives full credit when the patched code passes the provided test, even
+      though the fix is a bare except clause that swallows the error rather than
+      resolving the root cause.
+    good_example: >
+      The rubric requires the explanation to correctly identify the originating fault
+      location and causal chain; surface compliance (code runs, test passes) is
+      insufficient when the explanation is wrong or the fix does not generalize.
+
+  multiple_strong_paths:
+    definition: >
+      The case should allow more than one valid fix strategy. It should not require the
+      model to guess one preferred implementation style.
+    test_question: >
+      Could two structurally different correct fixes — one that refactors the loop bound,
+      one that adjusts the consumer — both score well for defensible reasons?
+
+  process_revelation:
+    definition: >
+      The task or explanation artifact should expose evidence about how the model traces
+      causality, chooses a fix scope, and anticipates regressions. A fix alone is
+      insufficient when explanation fidelity is part of ability_z.
+    test_question: >
+      Does the output reveal whether the model understood why the code failed, or only
+      that it produced a passing patch?
+
+  ceiling_signal:
+    definition: >
+      The case should include at least one scoring signal that can distinguish a model
+      that deeply understands the causal chain from one that produced a correct fix by
+      luck or pattern matching.
+    test_question: >
+      What would an excellent output do — in explanation, fix scope, or regression
+      awareness — that an adequate patch-only output would not?
+
+  explicit_limits:
+    definition: >
+      The case must state what success does not prove and which capability regions
+      remain uncovered.
+    test_question: >
+      What false confidence might this benchmark create if reported without limits?
+      For example: does passing this case prove the model generalizes to multi-file
+      bugs or runtime state corruption?
+
+anti_overfit_policy:
+  - Domain traits are lenses, not complete definitions of excellence.
+  - Treat each generated case as a plausible candidate that must earn promotion into the corpus through evidence.
+  - Written criteria are not exhaustive; competent judges may and should reject obvious gaming, fake compliance, and bad-faith literalism.
+  - Do not reward checklist satisfaction alone.
+  - Separate table-stakes disqualifiers (code runs, test passes) from ceiling-level ability signals (causal explanation, regression awareness).
+  - Prefer probes that allow unexpected excellence outside named traits.
+  - Do not turn a debugging domain into a mechanical patch-application game unless the claimed ability is mechanical patch application.
+  - A benchmark can use deterministic execution as a disqualifier, but execution success should not be the main evidence of high ability.
+  - Report known limits and uncovered capability regions (e.g. runtime state bugs, concurrency faults, multi-file causality).
+  - Reject rubrics that would unfairly punish a clearly excellent but structurally different correct solution.
+
+quality_gate_rules:
+  - Judge benchmark quality and proxy validity only. Do not reject merely because scoring requires running code or involves human judgment on explanations; that belongs to RubricGate.
+  - Treat the candidate as merely plausible until the candidate itself provides enough evidence to promote it into a useful benchmark proxy.
+  - Accept when the case applies meaningful diagnostic pressure on ability_z in environment_y and weak systems have plausible failure paths via pattern matching or traceback-following shortcuts.
+  - Accept only when the benchmark includes at least one ceiling signal, not just table-stakes disqualifiers.
+  - Treat domain traits as lenses rather than complete definitions; allow room for unexpected excellent fixes that differ from the expected solution path.
+  - Accept when difficulty comes from real capability pressure — misleading error messages, interacting bugs, silent failures, or fix-that-regresses structures — rather than code volume or import complexity.
+  - Accept when leakage risks are specific and materially mitigated by the case design, even if not eliminated.
+  - Hard reject if candidate-facing code, tests, comments, names, prompt text, or visible outputs reveal or nearly reveal the intended root cause, faulty expression, fix, or scoring answer.
+  - Reject when an obvious pattern-matching shortcut (traceback patching, test-output overfitting) would let a weak model pass, even if not explicitly named in the prompt or rubric.
+  - Reject when success can be achieved by mechanical substitution, generic defensive guards, or visible-test compliance without demonstrating ability_z.
+  - Reject when the case mostly detects floor ability (can the model read a traceback?) while claiming to measure high ability (does the model reason causally?).
+  - Reject when the proxy_claim is overbroad relative to what the case can actually show.
+  - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
+
+rubric_gate_rules:
+  - Judge scoring reliability only. Do not reject because the benchmark is hard, subjective, or imperfect as a proxy; that belongs to QualityGate.
+  - Treat the scoring setup as merely plausible until score_x and scoring_contract provide enough evidence to promote it as a reliable grading method.
+  - Accept when score_x and scoring_contract are concrete enough for a competent judge to apply with bounded variance.
+  - Accept when negative_controls exercise known failure paths (traceback patch, test-passing try/except) and should be clearly penalized by the scoring contract.
+  - Accept when scoring dimensions name observable output behaviors and include clear credit, penalty, and uncertainty handling.
+  - Accept only when the scoring contract preserves room for unexpected excellent solutions that differ from the anticipated fix.
+  - Accept only when judges are empowered to penalize obvious gaming — a fix that passes the visible test by silencing the exception rather than resolving the root cause.
+  - Reject when the benchmark's candidate-facing materials leak the answer so badly that the scoring contract cannot distinguish diagnosis from clue-following.
+  - Require table-stakes checks (code is syntactically valid, visible test passes) to be represented as disqualifiers or penalties, not as the main high-score signal.
+  - Reject scoring contracts that treat the written criteria as exhaustive and would give high scores to obvious loophole exploits.
+  - Reject vibes-only criteria, unbounded rater discretion, missing boundary examples, or scoring contracts that reward the wrong behavior.
+  - Reject when known-bad outputs (correct patch, wrong explanation; test passes but regression breaks) could receive high scores.
+  - Reject when a clearly excellent but structurally different correct fix would be unfairly punished by the rubric.
+  - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
+
+generator_guidance:
+  goal: >
+    Produce a benchmark case that provides defensible evidence that score_x reliably
+    distinguishes LLMs with and without the target debugging ability in single-turn
+    debug or explain-and-fix interactions. A committed case is one where a model lacking
+    the ability demonstrably cannot achieve a passing score through traceback-following,
+    test-output memorization, or surface-level substitution. The output should read as
+    a plausible candidate that carries enough evidence for a neutral gate to promote it,
+    not as a case that merely uses benchmark vocabulary.
+
+  scoring_contract_bar: >
+    Every scoring dimension must specify the observable difference between a
+    high-scoring and a low-scoring agent output in concrete, rater-applicable terms —
+    not abstract quality labels. "fix_quality" is a label. A criterion is:
+    "The fix modifies only the loop bound at line 7 (or an equivalent structural
+    correction), does not introduce a bare except, and the accompanying explanation
+    correctly names the off-by-one invariant as the originating fault — not the
+    IndexError at line 18 as the root cause." Each dimension must also have a
+    corresponding entry in scoring_contract.credit (what earns points) and
+    scoring_contract.penalties (what loses them). The scoring contract must contain an
+    anti-gaming standard: passing the visible test alone is insufficient when the model
+    has clearly pattern-matched or silenced the error rather than resolved the fault.
+
+  proxy_claim_bar: >
+    proxy_claim must argue WHY score_x discriminates between models with and without
+    ability_z — not restate what the dimensions measure. The argument must identify the
+    specific bottleneck: what step in producing a high-scoring output requires the
+    ability and cannot be bypassed. "This score measures fault localization" is not a
+    proxy claim. "A model without fault_localization ability will target the
+    error-site at line 18; the regression test structure ensures that fix does not
+    generalize to the power-of-two input, separating such models from models that
+    trace the causal chain back to the loop bound at line 7" is a proxy claim.
+
+  diagnostic_pressure_notes: >
+    Real pressure for debugging benchmarks requires at least two interacting conditions:
+    a misleading surface signal (error message, visible test, prominent code change)
+    that attracts the wrong fix, AND a structural property that makes the wrong fix fail
+    in a non-obvious way (regression test, invariant check, edge case input). A single
+    obvious syntax error or wrong-variable bug tests only error_pattern_recognition at
+    floor level. The model must be forced to trace causality rather than respond to the
+    nearest diagnostic signal. Never include candidate-facing comments, labels, names,
+    fixture strings, prompt text, or visible outputs that identify the intended root
+    cause, faulty expression, or repair; that destroys diagnostic pressure regardless
+    of how good the rubric looks.
+
+  common_rejection_patterns:
+    - name: answer_leak_in_candidate_materials
+      description: >
+        Any source comment, test name, fixture label, prompt phrase, or visible output
+        shown to the evaluated agent reveals the root cause or intended fix. Example:
+        code asking for fault localization while the source says "# BUG: off-by-one:
+        first slice starts at 1 instead of 0". This is an automatic benchmark-quality
+        failure because success no longer requires diagnosis.
+
+    - name: traceback_patch_as_proxy
+      description: >
+        Using a single error with a traceback that points directly to the fault line.
+        Any model that reads the traceback can produce the correct fix without
+        demonstrating causal understanding. The score must require positive evidence of
+        fault localization beyond the traceback pointer — e.g. a regression test the
+        traceback-patch fails, or an explanation that must correctly name the invariant.
+
+    - name: test_overfitting_loophole
+      description: >
+        A benchmark where the visible failing test uniquely constrains the fix, so the
+        model can generate a passing fix by treating the test as a specification without
+        understanding why the original code was wrong. The case must include orthogonal
+        regression cases or require an explanation that the rubric checks for causal
+        accuracy, not just test-passing status.
+
+    - name: rubric_names_without_criteria
+      description: >
+        Scoring dimensions named "fix_correctness", "reasoning_quality", or
+        "code_clarity" without behavioral operationalization. Each dimension needs a
+        concrete observable criterion: what a 1.0 output does vs. what a 0.0 output
+        does, in terms specific to the fault and fix in this case.
+
+    - name: proxy_claim_restates_dimensions
+      description: >
+        proxy_claim that says "score_x combines fix_correctness plus causal_explanation"
+        instead of arguing why a model lacking the ability cannot achieve a passing score.
+        The claim must identify the bottleneck — the step where the ability is required
+        and cannot be bypassed.
+
+    - name: single_diagnostic_signal
+      description: >
+        Bugs with only one meaningful diagnostic signal (e.g. "this throws a NameError
+        on line 5 — the variable is misspelled"). One signal does not create interacting
+        pressure; the model can comply by reading the traceback alone without demonstrating
+        causal reasoning.
+
+    - name: difficulty_from_code_volume_not_ability
+      description: >
+        Cases that appear hard because the code is long, uses many libraries, or has a
+        complex call graph, but where a model with no debugging ability can still score
+        well by careful reading and mechanical traceback following. Difficulty must come
+        from what the ability demands — the need to trace causality across a misleading
+        surface — not from code volume or import complexity.
+
+output_schema_path: schemas/benchmark_output.schema.json
+
+benchmark_case_schema:
+  $schema: https://json-schema.org/draft/2020-12/schema
+  type: object
+  additionalProperties: true
+  required: [prompt]
+  properties:
+    prompt:
+      type: string
+      minLength: 20
+    setup:
+      type: string
+    inputs:
+      type: object
+    environment:
+      type: object

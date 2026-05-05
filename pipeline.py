@@ -108,9 +108,9 @@ def after_audit_seed_plan(state: PipelineState) -> str:
     return "strategy"
 
 
-def after_validate_det(state: PipelineState) -> str:
+def after_validate_det(state: PipelineState) -> str | list[str]:
     if state["det_accepted"]:
-        return "quality_gate"
+        return ["quality_gate", "rubric_gate"]
     decision = state["last_decision"]
     if decision and decision.terminal:
         return after_terminal_seed(state)
@@ -124,16 +124,7 @@ def after_generate(state: PipelineState) -> str:
     return route_from_decision(state)
 
 
-def after_quality_gate(state: PipelineState) -> str:
-    decision = state["last_decision"]
-    if decision and decision.terminal:
-        return after_terminal_seed(state)
-    if decision and decision.verdict == Verdict.ACCEPT:
-        return "rubric_gate"
-    return route_from_decision(state)
-
-
-def after_rubric_gate(state: PipelineState) -> str:
+def after_gate_join(state: PipelineState) -> str:
     decision = state["last_decision"]
     if decision and decision.terminal:
         return after_terminal_seed(state)
@@ -166,6 +157,7 @@ class PipelineRunner:
         graph.add_node("validate_det", self.node_validate_det)
         graph.add_node("quality_gate", self.node_quality_gate)
         graph.add_node("rubric_gate", self.node_rubric_gate)
+        graph.add_node("join_gates", self.node_join_gates)
         graph.add_node("curate", self.node_curate)
         graph.add_edge(START, "strategy")
         graph.add_edge("strategy", "validate_seed_plan_det")
@@ -174,8 +166,8 @@ class PipelineRunner:
         graph.add_conditional_edges("audit_seed_plan", after_audit_seed_plan)
         graph.add_conditional_edges("generate", after_generate)
         graph.add_conditional_edges("validate_det", after_validate_det)
-        graph.add_conditional_edges("quality_gate", after_quality_gate)
-        graph.add_conditional_edges("rubric_gate", after_rubric_gate)
+        graph.add_edge(["quality_gate", "rubric_gate"], "join_gates")
+        graph.add_conditional_edges("join_gates", after_gate_join)
         graph.add_conditional_edges("curate", after_curate)
         return graph
 
@@ -501,33 +493,7 @@ class PipelineRunner:
             meta=quality_meta,
             retry_index=state["gen_attempt"],
         )
-        decision = route_after(
-            run_id=self.config.run_id,
-            from_stage=StageKind.VALIDATION,
-            verdict=quality_verdict.verdict,
-            route_code=quality_verdict.route_code,
-            retry_index=state["gen_attempt"],
-            max_generation_retries=self.config.domain.max_generation_retries,
-            subcodes=quality_verdict.subcodes,
-            reason_codes=quality_verdict.reason_codes,
-        )
-        update: PipelineState = {"quality_verdict": quality_verdict, "last_decision": decision}
-        if quality_verdict.verdict == Verdict.REJECT:
-            self.rejections.append(candidate, decision)
-            self._progress(
-                "candidate",
-                "rejected",
-                **_candidate_progress(candidate),
-                route=decision.route_code,
-                codes=decision.reason_codes or decision.subcodes,
-            )
-            if decision.terminal:
-                update["dropped_count"] = state["dropped_count"] + 1
-            else:
-                update["gen_attempt"] = state["gen_attempt"] + 1
-                update["gen_retry_route_code"] = decision.route_code
-                update["gen_retry_subcodes"] = decision.subcodes
-        return update
+        return {"quality_verdict": quality_verdict}
 
     def node_rubric_gate(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
@@ -548,18 +514,25 @@ class PipelineRunner:
             meta=rubric_meta,
             retry_index=state["gen_attempt"],
         )
+        return {"rubric_verdict": rubric_verdict}
+
+    def node_join_gates(self, state: PipelineState) -> PipelineState:
+        candidate = _require(state.get("candidate"), "candidate")
+        quality_verdict = _require(state.get("quality_verdict"), "quality_verdict")
+        rubric_verdict = _require(state.get("rubric_verdict"), "rubric_verdict")
+        verdict = quality_verdict if quality_verdict.verdict == Verdict.REJECT else rubric_verdict
         decision = route_after(
             run_id=self.config.run_id,
             from_stage=StageKind.VALIDATION,
-            verdict=rubric_verdict.verdict,
-            route_code=rubric_verdict.route_code,
+            verdict=verdict.verdict,
+            route_code=verdict.route_code,
             retry_index=state["gen_attempt"],
             max_generation_retries=self.config.domain.max_generation_retries,
-            subcodes=rubric_verdict.subcodes,
-            reason_codes=rubric_verdict.reason_codes,
+            subcodes=verdict.subcodes,
+            reason_codes=verdict.reason_codes,
         )
-        update: PipelineState = {"rubric_verdict": rubric_verdict, "last_decision": decision}
-        if rubric_verdict.verdict == Verdict.REJECT:
+        update: PipelineState = {"last_decision": decision}
+        if verdict.verdict == Verdict.REJECT:
             self.rejections.append(candidate, decision)
             self._progress(
                 "candidate",

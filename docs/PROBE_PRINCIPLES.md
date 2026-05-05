@@ -4,6 +4,10 @@ This pipeline treats benchmarks as engineered encounters, not mirrors of ability
 A benchmark case is useful when performance on it leaves defensible evidence about
 an entity's ability in a target environment.
 
+Generated cases start as plausible candidates, not accepted benchmarks. The
+validation gates should critique them enough to decide whether the evidence
+promotes them into useful benchmark proxies under stated assumptions and limits.
+
 The core claim remains:
 
 ```text
@@ -49,6 +53,25 @@ include keyword stuffing, format-only compliance, forbidden-token avoidance
 without positive evidence, cliche substitution, generic safe output, and
 checklist overfitting.
 
+### Critical Common Sense
+
+The written criteria are not an exhaustive loophole list. A competent judge
+should reject obvious fake compliance, bad-faith literalism, and shallow gaming
+even when the exact trick is not named, while staying fair to genuinely strong
+unanticipated solutions.
+
+Test question:
+
+```text
+Could a weak model get a high score by exploiting wording, swapping a few tokens,
+adding decorative mentions, or satisfying the checklist while plainly missing
+the intended capability?
+```
+
+Specificity is still required, but it cannot replace common sense. If the rubric
+would reward an output that obviously games the benchmark intent, the rubric is
+wrong.
+
 ### Multiple Strong Paths
 
 The case should allow more than one valid high-quality strategy. It should not
@@ -93,6 +116,8 @@ domains, where excellence can be emergent and hard to reduce to fixed traits.
 The active anti-overfit policy is:
 
 ```text
+- Written criteria are not exhaustive; reject obvious gaming, fake compliance,
+  and bad-faith literalism.
 - Do not reward checklist satisfaction alone.
 - Separate table-stakes disqualifiers from ceiling-level ability signals.
 - Prefer probes that allow unexpected excellence outside named traits.
@@ -107,7 +132,7 @@ The active anti-overfit policy is:
 
 ## Future Work
 
-We have not yet implemented adversarial score auditing.
+We have not yet implemented score auditing against real or synthetic outputs.
 
 That future stage would take:
 
