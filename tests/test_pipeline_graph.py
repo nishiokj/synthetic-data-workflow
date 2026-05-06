@@ -3,7 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END
 
 from config import build_runtime_config
-from models import ContextPolicy, RouteCode, RoutingDecision, StageKind, Verdict
+from models import ContextPolicy, RouteCode, RoutingDecision, SeedSpec, StageKind, TaxonomyCell, Verdict
 from pipeline import (
     PipelineRunner,
     after_audit_seed_plan,
@@ -15,6 +15,33 @@ from pipeline import (
     route_from_decision,
 )
 from tests.test_pipeline_smoke import FakeOpenAIClient
+
+
+def _code_seed(seed_id: str, *, environment_seed: dict | None = None) -> SeedSpec:
+    cell = TaxonomyCell(case_type="proxy_strong", difficulty=4, scenario="edge")
+    return SeedSpec.create(
+        seed_id=seed_id,
+        cell=cell,
+        intent="Create a compact benchmark around a realistic stateful debugging failure.",
+        ability="fault_localization",
+        environment="single_turn_debug_with_test",
+        environment_seed=environment_seed
+        if environment_seed is not None
+        else {
+            "product_context": "billing reconciliation worker for subscription invoices",
+            "codebase_shape": "parser, reconciliation engine, export adapter, and focused tests",
+            "state_model": "invoice rows move through parsed, matched, adjusted, and exported states",
+            "core_invariant": "recognized revenue totals must remain stable per billing period after adjustments",
+            "failure_surface": "monthly summary is wrong only for partial refunds near timezone boundaries",
+            "tempting_wrong_fix": "round the exported total or patch the summary formatter",
+            "actual_causal_region": "refund normalization before grouping by billing period",
+            "required_depth": "requires tracing a transformed value across parser, normalizer, and summarizer",
+            "non_goals": ["typo", "missing import", "one-line loop patch"],
+        },
+        diagnostic_pressure="misleading output error with upstream normalization cause",
+        scoring_strategy="hard_checks_plus_rubric",
+        leakage_risk="formatter-only patch passes visible symptom without preserving invariant",
+    )
 
 
 def _decision(
@@ -71,6 +98,42 @@ def test_graph_recursion_limit_scales_with_run_policy() -> None:
     )
 
     assert _graph_recursion_limit(config) > 25
+
+
+def test_seed_plan_partition_keeps_valid_seeds_from_mixed_batch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    config = build_runtime_config(
+        domain_path="domains/benchmark_code_debug.yaml",
+        target_stage="benchmark",
+        target_n=1,
+        seed=42,
+        run_id="partition",
+    )
+    config.data_dir = tmp_path / "data"
+    config.logs_dir = tmp_path / "logs"
+    runner = PipelineRunner(config)
+    valid_seed = _code_seed("valid-seed")
+    toy_seed = _code_seed(
+        "toy-seed",
+        environment_seed={
+            "product_context": "small list utility",
+            "codebase_shape": "one module and one test file",
+            "state_model": "single list input and output",
+            "core_invariant": "return all items in order",
+            "failure_surface": "one visible test fails",
+            "tempting_wrong_fix": "change one loop bound",
+            "actual_causal_region": "off-by-one in a single loop",
+            "required_depth": "one-line patch",
+            "non_goals": ["larger system debugging"],
+        },
+    )
+
+    accepted, rejected = runner._partition_seed_plan([toy_seed, valid_seed])
+
+    assert [seed.id for seed in accepted] == ["valid-seed"]
+    assert [(seed.id, route_code, subcodes) for seed, route_code, subcodes in rejected] == [
+        ("toy-seed", RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"])
+    ]
 
 
 def test_route_from_decision_dispatches_by_next_stage() -> None:

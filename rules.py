@@ -29,8 +29,53 @@ def validate_seed_plan(seeds: list[Any], domain: DomainConfig) -> tuple[Verdict,
             return Verdict.REJECT, RouteCode.REJECT_COVERAGE_MISMATCH, ["unknown_scenario"]
         if seed.content_hash in seen:
             return Verdict.REJECT, RouteCode.REJECT_DUPLICATE, ["duplicate_seed"]
+        seed_environment_verdict = _validate_seed_environment(seed, domain)
+        if seed_environment_verdict is not None:
+            return seed_environment_verdict
         seen.add(seed.content_hash)
     return Verdict.ACCEPT, RouteCode.ACCEPT, []
+
+
+_CODE_ENV_SEED_REQUIRED_FIELDS = {
+    "product_context",
+    "codebase_shape",
+    "state_model",
+    "core_invariant",
+    "failure_surface",
+    "tempting_wrong_fix",
+    "actual_causal_region",
+    "required_depth",
+    "non_goals",
+}
+
+_TOY_CODE_SEED_MARKERS = {
+    "typo",
+    "missing import",
+    "off-by-one",
+    "one-line",
+    "single loop",
+    "wrong operator",
+}
+
+
+def _validate_seed_environment(seed: Any, domain: DomainConfig) -> tuple[Verdict, RouteCode, list[str]] | None:
+    if domain.domain_id != "benchmark_code_debug":
+        return None
+
+    env_seed = getattr(seed, "environment_seed", {}) or {}
+    if not isinstance(env_seed, dict):
+        return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
+
+    missing = [field for field in sorted(_CODE_ENV_SEED_REQUIRED_FIELDS) if not env_seed.get(field)]
+    if missing:
+        return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
+
+    core_fields = _CODE_ENV_SEED_REQUIRED_FIELDS - {"non_goals"}
+    core_text = " ".join(str(env_seed.get(field, "")) for field in core_fields).lower()
+    if any(marker in core_text for marker in _TOY_CODE_SEED_MARKERS):
+        return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
+
+    return None
 
 
 def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfig) -> tuple[SampleVerdict, list[CheckResult]]:
@@ -40,6 +85,7 @@ def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfi
         _schema_check(candidate, domain),
         _taxonomy_check(candidate, domain),
         _benchmark_contract_check(candidate, domain),
+        _benchmark_oracle_check(candidate, domain),
     ]
     failed = [check for check in checks if not check.passed]
     if not failed:
@@ -167,6 +213,24 @@ def _benchmark_contract_check(candidate: CandidateSample, domain: DomainConfig) 
     return CheckResult(check_id="benchmark_contract", passed=True)
 
 
+def _benchmark_oracle_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
+    if not bool(domain.deterministic_rules.get("require_benchmark_oracle", False)):
+        return CheckResult(check_id="benchmark_oracle", passed=True)
+    oracle = candidate.benchmark_case.get("oracle")
+    if not isinstance(oracle, dict):
+        return _failed_oracle("benchmark_case.oracle is required")
+    expected = oracle.get("expected_repair_characteristics")
+    if not expected:
+        return _failed_oracle("oracle.expected_repair_characteristics is required")
+    hidden_tests = oracle.get("hidden_tests", [])
+    if not isinstance(hidden_tests, list) or len(hidden_tests) < int(domain.deterministic_rules.get("min_hidden_tests", 1)):
+        return _failed_oracle("oracle.hidden_tests has too few items")
+    shallow_fix_failures = oracle.get("shallow_fix_failures", [])
+    if not isinstance(shallow_fix_failures, list) or len(shallow_fix_failures) < int(domain.deterministic_rules.get("min_shallow_fix_failures", 1)):
+        return _failed_oracle("oracle.shallow_fix_failures has too few items")
+    return CheckResult(check_id="benchmark_oracle", passed=True)
+
+
 def _failed_contract(subcode: str, value: str) -> CheckResult:
     route = RouteCode.REJECT_LEAKAGE if subcode == "shortcut_leakage" else RouteCode.REJECT_CRITERIA_MISMATCH
     return CheckResult(
@@ -175,4 +239,14 @@ def _failed_contract(subcode: str, value: str) -> CheckResult:
         route_code=route,
         subcode=subcode,
         evidence=[EvidenceRef(source="deterministic_rule", path="candidate", value=value)],
+    )
+
+
+def _failed_oracle(value: str) -> CheckResult:
+    return CheckResult(
+        check_id="benchmark_oracle",
+        passed=False,
+        route_code=RouteCode.REJECT_CRITERIA_MISMATCH,
+        subcode="missing_oracle",
+        evidence=[EvidenceRef(source="deterministic_rule", path="benchmark_case.oracle", value=value)],
     )

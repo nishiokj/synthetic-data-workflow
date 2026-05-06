@@ -244,7 +244,18 @@ class PipelineRunner:
     def node_validate_seed_plan_det(self, state: PipelineState) -> PipelineState:
         seeds = state["seeds_queue"]
         self._progress("plan_det", "start", round=state["plan_round"], seeds=len(seeds))
-        verdict, route_code, subcodes = validate_seed_plan(seeds, self.config.domain)
+        accepted_seeds, rejected_seeds = self._partition_seed_plan(seeds)
+        if accepted_seeds:
+            verdict = Verdict.ACCEPT
+            route_code = RouteCode.ACCEPT
+            subcodes: list[str] = []
+        elif rejected_seeds:
+            _, route_code, subcodes = rejected_seeds[0]
+            verdict = Verdict.REJECT
+        else:
+            verdict = Verdict.REJECT
+            route_code = RouteCode.RETRY_PROVIDER_EMPTY
+            subcodes = ["provider_error"]
         retry_index = state["plan_round"] - 1
         decision = route_after(
             run_id=self.config.run_id,
@@ -269,12 +280,44 @@ class PipelineRunner:
             meta=_local_meta(),
             retry_index=retry_index,
         )
-        update: PipelineState = {"last_decision": decision}
+        update: PipelineState = {"last_decision": decision, "seeds_queue": accepted_seeds}
+        for rejected_seed, rejected_route_code, rejected_subcodes in rejected_seeds:
+            rejected_decision = RoutingDecision(
+                run_id=self.config.run_id,
+                from_stage=StageKind.PLAN_AUDIT,
+                verdict=Verdict.REJECT,
+                route_code=rejected_route_code,
+                subcodes=rejected_subcodes,
+                reason_codes=rejected_subcodes,
+                next_stage=None,
+                context_policy=ContextPolicy.CRITERIA_ONLY,
+                retry_index=retry_index,
+                terminal=True,
+            )
+            self.rejections.append(rejected_seed, rejected_decision)
         if verdict == Verdict.REJECT:
-            self.rejections.append({"seeds": [seed.model_dump(mode="json") for seed in seeds]}, decision)
             update["plan_retry_route_code"] = decision.route_code
             update["plan_retry_subcodes"] = decision.subcodes
         return update
+
+    def _partition_seed_plan(
+        self,
+        seeds: list[SeedSpec],
+    ) -> tuple[list[SeedSpec], list[tuple[SeedSpec, RouteCode, list[str]]]]:
+        accepted: list[SeedSpec] = []
+        rejected: list[tuple[SeedSpec, RouteCode, list[str]]] = []
+        seen: set[str] = set()
+        for seed in seeds:
+            if seed.content_hash in seen:
+                rejected.append((seed, RouteCode.REJECT_DUPLICATE, ["duplicate_seed"]))
+                continue
+            verdict, route_code, subcodes = validate_seed_plan([seed], self.config.domain)
+            if verdict == Verdict.ACCEPT:
+                accepted.append(seed)
+                seen.add(seed.content_hash)
+            else:
+                rejected.append((seed, route_code, subcodes))
+        return accepted, rejected
 
     def node_select_next_seed(self, state: PipelineState) -> PipelineState:
         seeds = list(state["seeds_queue"])

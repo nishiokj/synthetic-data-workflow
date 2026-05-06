@@ -10,6 +10,8 @@ __pycache__/
 
 logs/
 data/
+dist/
+.bundle-build/
 
 *.pyc
 *.pyo

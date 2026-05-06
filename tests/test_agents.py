@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import socket
 from typing import Any
 
-from agents import OpenAIClient
+from agents import OpenAIClient, _coerce_gate_verdict
 from config import ModelConfig
+from models import RouteCode, Verdict
 
 
 def test_reasoning_effort_is_sent_for_reasoning_models(monkeypatch) -> None:
@@ -89,3 +91,47 @@ def test_complete_text_returns_plain_model_output(monkeypatch) -> None:
     assert output == "A small test output."
     assert captured["body"]["messages"][1]["content"] == "Write."
     assert meta["output_tokens"] == 4
+
+
+def test_accept_with_reject_signal_code_is_coerced_to_reject() -> None:
+    verdict, route_code, subcodes, reason_codes = _coerce_gate_verdict(
+        verdict=Verdict.ACCEPT,
+        route_code=RouteCode.ACCEPT,
+        subcodes=["proxy_strong"],
+        reason_codes=["proxy_strong", "weak_diagnostic_pressure"],
+    )
+
+    assert verdict == Verdict.REJECT
+    assert route_code == RouteCode.REJECT_SEMANTIC_MISMATCH
+    assert "weak_diagnostic_pressure" in subcodes
+    assert "weak_diagnostic_pressure" in reason_codes
+
+
+def test_post_wraps_socket_read_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class TimeoutResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            raise socket.timeout("read timed out")
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 12
+        return TimeoutResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = OpenAIClient(ModelConfig(request_timeout_seconds=12))
+
+    try:
+        client._post("/chat/completions", {"model": "test"})
+    except Exception as exc:
+        assert type(exc).__name__ == "ProviderError"
+        assert "read timed out after 12s" in str(exc)
+    else:
+        raise AssertionError("expected ProviderError")

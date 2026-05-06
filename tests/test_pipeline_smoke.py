@@ -119,6 +119,7 @@ def test_pipeline_smoke_uses_fenced_fake_provider(tmp_path, monkeypatch) -> None
         "benchmark_case_schema",
         "taxonomy_cell",
         "benchmark_contract",
+        "benchmark_oracle",
     ]
     assert committed["candidate"]["output"]["benchmark_case"]["prompt"]
     assert [check["check_kind"] for check in committed["semantic_checks"]] == ["quality", "rubric"]

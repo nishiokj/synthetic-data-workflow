@@ -15,6 +15,7 @@ class ModelConfig(BaseModel):
     embedding_model: str = "text-embedding-3-small"
     base_url: str = "https://api.openai.com/v1"
     reasoning_effort: str | None = "medium"
+    request_timeout_seconds: float = 180.0
 
 
 class DomainConfig(BaseModel):
@@ -119,6 +120,7 @@ def build_runtime_config(
         or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "medium") or None,
+        request_timeout_seconds=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "180")),
     )
     return RuntimeConfig(
         domain=domain,

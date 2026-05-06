@@ -146,6 +146,33 @@ No checked-in static demo output should be presented as a successful run. The
 demo requires actual API credentials and must make live provider calls for the
 LLM and embedding stages. Test doubles are allowed only inside tests.
 
+## Agent Bundle
+
+For benchmark runners that mount the pipeline into existing task images, build a
+PyInstaller bundle:
+
+```bash
+scripts/build_agent_bundle.sh
+```
+
+The script auto-selects `python3.12`, `python3.11`, or `python3.10` when
+available. You can override it with `PYTHON_BIN=/path/to/python3.10`.
+
+The script creates `dist/synth-pipeline-bundle/`, including a runnable entrypoint
+and the checked-in domain contracts:
+
+```bash
+dist/synth-pipeline-bundle/bin/synth-pipeline/synth-pipeline \
+  --domain dist/synth-pipeline-bundle/share/domains/benchmark_haiku.yaml \
+  --target-n 1 \
+  --run-id smoke
+```
+
+The bundle carries its own Python runtime and pinned dependencies, so the task
+image does not need `python3` installed just to launch the pipeline. It still
+must be compatible with the platform the bundle was built for, and any external
+tools or credentials the pipeline uses must be available at runtime.
+
 ## Environment
 
 The live POC uses real provider calls for LLM and embedding stages. You can put

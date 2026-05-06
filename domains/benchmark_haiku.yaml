@@ -3,13 +3,6 @@ dataset_version: poc-2
 
 case_types:
   - proxy_strong
-  - score_unreliable
-  - weak_diagnostic_pressure
-  - shortcut_leakage
-  - fake_difficulty
-  - ambiguous_success_criteria
-  - low_environment_relevance
-  - redundant_coverage
 
 difficulties: [1, 2, 3, 4, 5]
 scenarios: [nominal, edge, adversarial]

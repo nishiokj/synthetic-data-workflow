@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -131,13 +132,16 @@ class OpenAIClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                return json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds) as response:
+                raw = response.read()
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise ProviderError(f"OpenAI HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise ProviderError(f"OpenAI connection error: {exc}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise ProviderError(f"OpenAI read timed out after {self.config.request_timeout_seconds:g}s") from exc
 
 
 class Strategist:
@@ -179,6 +183,17 @@ class Strategist:
                         "scenario": "one allowed scenario",
                         "ability": "one allowed ability or specific sub-ability",
                         "environment": "one allowed environment or environment slice",
+                        "environment_seed": {
+                            "product_context": "specific realistic software setting",
+                            "codebase_shape": "compact description of modules/files/components",
+                            "state_model": "objects, data flow, lifecycle, or invariant-bearing state",
+                            "core_invariant": "behavior that must remain true",
+                            "failure_surface": "observable symptom or user-facing failure",
+                            "tempting_wrong_fix": "plausible shallow repair path",
+                            "actual_causal_region": "where the real cause should live",
+                            "required_depth": "why resolving it requires nontrivial reasoning",
+                            "non_goals": ["toy bug shapes to avoid"],
+                        },
                         "diagnostic_pressure": "specific pressure this case should apply",
                         "scoring_strategy": "how score_x should be determined",
                         "leakage_risk": "most likely way the benchmark could be passed without the target ability",
@@ -208,6 +223,7 @@ class Strategist:
                     intent=raw["intent"],
                     ability=str(raw["ability"]),
                     environment=str(raw["environment"]),
+                    environment_seed=raw["environment_seed"] if isinstance(raw.get("environment_seed"), dict) else {},
                     diagnostic_pressure=str(raw["diagnostic_pressure"]),
                     scoring_strategy=str(raw["scoring_strategy"]),
                     leakage_risk=str(raw["leakage_risk"]),
@@ -241,6 +257,26 @@ class PlanAuditor:
                     "diagnostic_pressure_types": self.domain.diagnostic_pressure_types,
                     "scoring_methods": self.domain.scoring_methods,
                     "difficulty_range": self.domain.difficulties,
+                    "code_seed_standard": {
+                        "required_when_domain": "benchmark_code_debug",
+                        "environment_seed_must_define": [
+                            "product_context",
+                            "codebase_shape",
+                            "state_model",
+                            "core_invariant",
+                            "failure_surface",
+                            "tempting_wrong_fix",
+                            "actual_causal_region",
+                            "required_depth",
+                            "non_goals",
+                        ],
+                        "reject_if": [
+                            "the seed can naturally instantiate as a one-line patch",
+                            "the environment is just a file/function label",
+                            "the tempting wrong fix is not plausible",
+                            "the failure has no state, invariant, or causal depth",
+                        ],
+                    },
                     "route_codes": self.domain.route_codes,
                     "subcodes": self.domain.subcodes,
                 },
@@ -288,6 +324,20 @@ making token-level substitutions, adding decorative details, or satisfying
 checklists without showing the target ability, the candidate has not earned
 promotion.
 
+Aim above the smallest plausible task. Favor cases with meaningful structure:
+multiple interacting signals, a realistic but compact environment, a tempting
+wrong path, and a scoring setup that can separate adequate from excellent
+outputs. Do not create complexity by adding noise, verbosity, irrelevant files,
+or confusing wording. Create complexity through causal depth, tradeoffs,
+coverage breadth, and non-obvious failure modes.
+
+Avoid safe benchmark templates unless the seed explicitly requires one. In code
+debugging, do not default to trivial off-by-one, typo, missing import, wrong
+operator, or single visible failing assertion cases. If you use a familiar bug
+shape, add a substantive twist: an upstream producer/consumer mismatch, an
+invariant that only fails under an edge case, a misleading product constraint,
+or an explanation burden that reveals real causal reasoning.
+
 Never leak the answer in candidate-facing material. If the benchmark asks an
 agent to infer, diagnose, judge, repair, or discover something, the prompt,
 inputs, code comments, labels, filenames, visible outputs, fixtures, and setup
@@ -313,22 +363,30 @@ its stated assumptions and limits.
 
 def _format_generator_guidance(domain: DomainConfig) -> str:
     guidance = domain.generator_guidance
-    principles = domain.general_probe_principles
-    anti_overfit = domain.anti_overfit_policy
-    if not guidance and not principles and not anti_overfit:
+    if not guidance:
         return ""
     parts: list[str] = []
-    _format_probe_principles(parts, principles)
-    _format_anti_overfit_policy(parts, anti_overfit)
-    if guidance:
-        parts.append("\nDOMAIN-SPECIFIC GUIDANCE")
+    parts.append("\nDOMAIN-SPECIFIC GENERATOR GUIDANCE")
     _section(parts, "Goal", guidance.get("goal"))
     _section(parts, "Scoring contract standard", guidance.get("scoring_contract_bar"))
     _section(parts, "Proxy claim standard", guidance.get("proxy_claim_bar"))
     _section(parts, "Diagnostic pressure in this domain", guidance.get("diagnostic_pressure_notes"))
+    return "\n".join(parts)
+
+
+def _format_gate_guidance(domain: DomainConfig, rules_attr: str) -> str:
+    parts: list[str] = []
+    rules = getattr(domain, rules_attr)
+    if rules:
+        parts.append("\nDOMAIN GATE RULES")
+        for rule in rules:
+            parts.append(f"  - {rule}")
+    _format_probe_principles(parts, domain.general_probe_principles)
+    _format_anti_overfit_policy(parts, domain.anti_overfit_policy)
+    guidance = domain.generator_guidance
     patterns = guidance.get("common_rejection_patterns", [])
     if patterns:
-        parts.append("\nRejection patterns to avoid:")
+        parts.append("\nCOMMON REJECTION PATTERNS")
         for p in patterns:
             parts.append(f"  - {p['name']}: {str(p['description']).strip()}")
     return "\n".join(parts)
@@ -389,10 +447,6 @@ class SampleGenerator:
             "domain": {
                 "output_schema": self.domain.output_schema,
                 "benchmark_case_schema": self.domain.benchmark_case_schema,
-                "semantic_rules": self.domain.semantic_rules,
-                "general_probe_principles": self.domain.general_probe_principles,
-                "anti_overfit_policy": self.domain.anti_overfit_policy,
-                "reason_codes": self.domain.reason_codes,
                 "abilities": self.domain.abilities,
                 "environments": self.domain.environments,
                 "diagnostic_pressure_types": self.domain.diagnostic_pressure_types,
@@ -431,7 +485,7 @@ class SampleGenerator:
         if retry_route_code is not None:
             payload["prior_generation_rejection"] = {
                 "route_code": retry_route_code.value,
-                "subcodes": retry_subcodes or [],
+                "subcodes": _generator_safe_retry_subcodes(retry_subcodes or []),
             }
         user = json.dumps(payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.8)
@@ -484,9 +538,10 @@ class _GateValidator:
     def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
+        self._system = self.system_prompt + _format_gate_guidance(domain, self.rules_attr)
 
     def validate(self, candidate: CandidateSample) -> tuple[SampleVerdict, dict[str, Any]]:
-        system = self.system_prompt
+        system = self._system
         rules = getattr(self.domain, self.rules_attr)
         user = json.dumps(
             {
@@ -512,14 +567,25 @@ class _GateValidator:
         )
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.2)
         verdict = _verdict(payload.get("verdict"))
-        default_route = RouteCode.ACCEPT if verdict == Verdict.ACCEPT else RouteCode.REJECT_SEMANTIC_MISMATCH
+        subcodes = list(payload.get("subcodes", []))
+        reason_codes = list(payload.get("reason_codes", []))
+        route_code = _route_code(
+            payload.get("route_code"),
+            default=RouteCode.ACCEPT if verdict == Verdict.ACCEPT else RouteCode.REJECT_SEMANTIC_MISMATCH,
+        )
+        verdict, route_code, subcodes, reason_codes = _coerce_gate_verdict(
+            verdict=verdict,
+            route_code=route_code,
+            subcodes=subcodes,
+            reason_codes=reason_codes,
+        )
         sample_verdict = SampleVerdict(
             candidate_id=candidate.id,
             check_kind=self.check_kind,
             verdict=verdict,
-            route_code=_route_code(payload.get("route_code"), default=default_route),
-            subcodes=list(payload.get("subcodes", [])),
-            reason_codes=list(payload.get("reason_codes", [])),
+            route_code=route_code,
+            subcodes=subcodes,
+            reason_codes=reason_codes,
             evidence=_evidence(payload.get("evidence", [])),
             rationale=str(payload.get("rationale", "")),
         )
@@ -532,14 +598,20 @@ class QualityGate(_GateValidator):
     rules_attr = "quality_gate_rules"
     system_prompt = (
         "You are QualityGate for a benchmark-generation pipeline. "
-        "Treat every candidate as merely plausible until its evidence earns promotion into the corpus. "
-        "Judge whether the benchmark case is a useful proxy for ability_z in environment_y. "
+        "You are an adversarial quality gate. Your job is to prevent weak, toy, low-effort, or benchmark-shaped-but-empty cases from entering the corpus. "
+        "Treat every candidate as rejected by default until the concrete artifact earns promotion. "
+        "Judge whether the benchmark case is a strong proxy for ability_z in environment_y. "
         "Focus on diagnostic pressure, proxy validity, difficulty, environment relevance, and leakage mitigation. "
-        "Critique the candidate enough to decide whether the bridge from score_x to ability_z in environment_y actually holds. "
+        "Inspect the candidate-facing prompt, files, tests, visible symptoms, shallow fixes, negative controls, and scoring contract before trusting any proxy_claim. Treat hidden tests or oracle material as scoring support only, not quality evidence. "
+        "Reject if the local artifact is weak even when the wrapper language sounds rigorous. "
+        "Reject benchmarks whose core task is an obvious one-line local patch, typo, missing import, trivial off-by-one, simple slice change, literal/operator swap, or direct traceback repair. Hidden tests, oracle text, negative controls, or rubric language do not rescue a toy core task. "
+        "Reject if hidden tests or oracle requirements are the only source of difficulty but the candidate-facing requirements do not establish that behavior. "
+        "Reject if negative controls are straw men, hidden tests do not discriminate, or weak models can pass through visible-test compliance, pattern matching, mechanical substitution, or generic defensive guards. "
         "Actively inspect all candidate-facing material for answer leakage: prompts, inputs, code comments, labels, filenames, tests, fixtures, visible outputs, and setup. "
         "If the benchmark reveals or strongly hints at the intended answer, root cause, fix, or scoring target, reject it even if the rubric is otherwise strong. "
         "Do not reject merely because scoring is subjective or imperfect; RubricGate judges scoring reliability. "
-        "Accept imperfect but useful benchmark proxies when their limits are explicit and success would be meaningful evidence of ability. "
+        "Do not accept merely plausible, tidy, coherent, or low-difficulty cases. "
+        "Accept only when success would be meaningful evidence of the claimed ability and failure modes are concretely exercised by the artifact. "
         "Return verdict metadata plus a concise public rationale. Do not reveal hidden chain-of-thought. "
         "Do not rewrite or repair anything. Return JSON only."
     )
@@ -551,13 +623,16 @@ class RubricGate(_GateValidator):
     rules_attr = "rubric_gate_rules"
     system_prompt = (
         "You are RubricGate for a benchmark-generation pipeline. "
-        "Treat the scoring setup as merely plausible until its evidence earns promotion. "
+        "You are an adversarial scoring gate. Treat the scoring setup as rejected by default until it proves it can grade the artifact reliably. "
         "Judge whether score_x and scoring_contract are reliable enough to grade outputs for this benchmark case. "
         "Focus on observable criteria, negative controls, boundary handling, judge variance, and whether known-bad outputs are penalized. "
-        "Critique the scoring setup enough to decide whether score_x can be applied consistently and whether high scores would mean what the benchmark claims. "
+        "Inspect whether score_x is grounded in the actual artifact evidence, visible tests, shallow fixes, and patch behavior. "
+        "Reject if the rubric rewards benchmark theater, explanation polish, or visible-test passing without executable or inspectable evidence of the claimed ability. "
+        "Reject if known-bad or shallow patches could receive high scores, if negative controls are straw men, or if graders must invent missing ground truth. "
         "If candidate-facing materials leak the answer so badly that high scores cannot distinguish true ability from clue-following, reject the scoring setup as unreliable. "
         "Do not reject merely because the benchmark is subjective, hard, or not a perfect proxy; QualityGate judges benchmark quality. "
-        "Accept imperfect scoring methods when discretion is bounded enough for the benchmark's stated use. "
+        "Do not accept vague, permissive, or merely plausible scoring contracts. "
+        "Accept only when the scoring contract would reliably punish shallow fixes and reward the intended capability in the actual benchmark artifact. Do not accept a scoring setup that makes a toy benchmark look rigorous by adding hidden oracle machinery. "
         "Return verdict metadata plus a concise public rationale. Do not reveal hidden chain-of-thought. "
         "Do not rewrite or repair anything. Return JSON only."
     )
@@ -581,6 +656,68 @@ def _route_code(value: Any, *, default: RouteCode) -> RouteCode:
         return RouteCode(str(value))
     except ValueError:
         return default
+
+
+_REJECT_SIGNAL_CODES = {
+    "weak_proxy_validity",
+    "unreliable_score",
+    "weak_diagnostic_pressure",
+    "shortcut_leakage",
+    "vague_scoring_contract",
+    "fake_difficulty",
+    "irrelevant_environment",
+    "ambiguous_success_criteria",
+    "overbroad_proxy_claim",
+    "missing_known_limits",
+    "missing_negative_control",
+    "missing_oracle",
+    "schema_violation",
+    "near_duplicate",
+}
+
+
+_GENERATOR_RETRY_CODE_MAP = {
+    "missing_private_oracle": "weak_judge_confidence",
+    "missing_oracle": "weak_judge_confidence",
+    "private_oracle_integrity": "weak_judge_confidence",
+}
+
+
+def _generator_safe_retry_subcodes(subcodes: list[str]) -> list[str]:
+    safe: list[str] = []
+    for code in subcodes:
+        mapped = _GENERATOR_RETRY_CODE_MAP.get(code, code)
+        if mapped not in safe:
+            safe.append(mapped)
+    return safe
+
+
+def _coerce_gate_verdict(
+    *,
+    verdict: Verdict,
+    route_code: RouteCode,
+    subcodes: list[str],
+    reason_codes: list[str],
+) -> tuple[Verdict, RouteCode, list[str], list[str]]:
+    labels = {str(code) for code in [*subcodes, *reason_codes]}
+    reject_labels = sorted(labels & _REJECT_SIGNAL_CODES)
+    if verdict == Verdict.ACCEPT and reject_labels:
+        merged_subcodes = _dedupe([*subcodes, *reject_labels])
+        merged_reason_codes = _dedupe([*reason_codes, *reject_labels])
+        route = RouteCode.REJECT_LEAKAGE if "shortcut_leakage" in reject_labels else RouteCode.REJECT_SEMANTIC_MISMATCH
+        return Verdict.REJECT, route, merged_subcodes, merged_reason_codes
+    return verdict, route_code, subcodes, reason_codes
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _evidence(values: Any) -> list[EvidenceRef]:

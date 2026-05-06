@@ -106,6 +106,7 @@ class SeedSpec(BaseModel):
     intent: str
     ability: str
     environment: str
+    environment_seed: dict[str, Any] = Field(default_factory=dict)
     diagnostic_pressure: str
     scoring_strategy: str
     leakage_risk: str
@@ -121,6 +122,7 @@ class SeedSpec(BaseModel):
         intent: str,
         ability: str,
         environment: str,
+        environment_seed: dict[str, Any] | None = None,
         diagnostic_pressure: str,
         scoring_strategy: str,
         leakage_risk: str,
@@ -133,6 +135,7 @@ class SeedSpec(BaseModel):
                 "intent": intent,
                 "ability": ability,
                 "environment": environment,
+                "environment_seed": environment_seed or {},
                 "diagnostic_pressure": diagnostic_pressure,
                 "scoring_strategy": scoring_strategy,
                 "leakage_risk": leakage_risk,
@@ -145,6 +148,7 @@ class SeedSpec(BaseModel):
             intent=intent,
             ability=ability,
             environment=environment,
+            environment_seed=environment_seed or {},
             diagnostic_pressure=diagnostic_pressure,
             scoring_strategy=scoring_strategy,
             leakage_risk=leakage_risk,
