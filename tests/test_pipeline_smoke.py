@@ -111,8 +111,14 @@ def test_pipeline_smoke_uses_fenced_fake_provider(tmp_path, monkeypatch) -> None
     corpus_path = tmp_path / "data" / "corpus" / "benchmark" / "smoke.jsonl"
     assert corpus_path.exists()
     assert (tmp_path / "logs" / "smoke" / "stage_records.jsonl").exists()
+    candidates_path = tmp_path / "logs" / "smoke" / "candidates.jsonl"
+    assert candidates_path.exists()
 
     committed = json.loads(corpus_path.read_text(encoding="utf-8").splitlines()[0])
+    candidate_snapshots = [json.loads(line) for line in candidates_path.read_text(encoding="utf-8").splitlines()]
+    assert [snapshot["phase"] for snapshot in candidate_snapshots] == ["generated", "adversary_revision"]
+    assert candidate_snapshots[1]["parent_candidate_id"] == candidate_snapshots[0]["candidate_id"]
+    assert candidate_snapshots[1]["adversary_report_id"] == f"{candidate_snapshots[0]['candidate_id']}-adversary-report"
     assert [check["check_id"] for check in committed["deterministic_checks"]] == [
         "text_hygiene",
         "output_schema",

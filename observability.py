@@ -40,6 +40,12 @@ class StageLogWriter:
     def append_rejection(self, value: Any) -> None:
         self._append_jsonl(self.run_dir / "rejections.jsonl", _jsonable(value))
 
+    def append_adversary_report(self, value: Any) -> None:
+        self._append_jsonl(self.run_dir / "adversary.jsonl", _jsonable(value))
+
+    def append_candidate(self, value: Any) -> None:
+        self._append_jsonl(self.run_dir / "candidates.jsonl", _jsonable(value))
+
     def _append_jsonl(self, path: Path, value: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:

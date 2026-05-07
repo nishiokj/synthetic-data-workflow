@@ -81,6 +81,8 @@ def test_compiled_graph_contains_pipeline_nodes(monkeypatch) -> None:
         "audit_seed_plan",
         "generate",
         "validate_det",
+        "adversary",
+        "revise_from_adversary",
         "quality_gate",
         "rubric_gate",
         "join_gates",

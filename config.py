@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -14,7 +14,7 @@ class ModelConfig(BaseModel):
     model: str = "gpt-5-mini"
     embedding_model: str = "text-embedding-3-small"
     base_url: str = "https://api.openai.com/v1"
-    reasoning_effort: str | None = "medium"
+    reasoning_effort: Optional[str] = "medium"
     request_timeout_seconds: float = 180.0
 
 
@@ -41,7 +41,7 @@ class DomainConfig(BaseModel):
     quality_gate_rules: list[str] = Field(default_factory=list)
     rubric_gate_rules: list[str] = Field(default_factory=list)
     generator_guidance: dict[str, Any] = Field(default_factory=dict)
-    output_schema_path: str | None = None
+    output_schema_path: Optional[str] = None
     output_schema: dict[str, Any] = Field(default_factory=dict)
     benchmark_case_schema: dict[str, Any]
 
@@ -106,9 +106,9 @@ def build_runtime_config(
     target_n: int,
     seed: int,
     run_id: str,
-    model: str | None = None,
-    provider: str | None = None,
-    embedding_model: str | None = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    embedding_model: Optional[str] = None,
     console_progress: bool = True,
 ) -> RuntimeConfig:
     load_env_file()

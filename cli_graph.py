@@ -16,6 +16,22 @@ NODE_ORDER = [
     "audit_seed_plan",
     "generate",
     "validate_det",
+    "adversary",
+    "revise_from_adversary",
+    "quality_gate",
+    "rubric_gate",
+    "join_gates",
+    "curate",
+]
+
+STAGE_NODE_ORDER = [
+    "strategy",
+    "validate_seed_plan_det",
+    "audit_seed_plan",
+    "generate",
+    "validate_det",
+    "adversary",
+    "revise_from_adversary",
     "quality_gate",
     "rubric_gate",
     "curate",
@@ -24,24 +40,30 @@ NODE_ORDER = [
 NODE_LABELS_FULL = {
     "strategy": "strategy",
     "validate_seed_plan_det": "plan_det",
-    "select_next_seed": "select_seed",
+    "select_next_seed": "seed_cursor",
     "audit_seed_plan": "plan_audit",
     "generate": "generate",
     "validate_det": "validate_det",
+    "adversary": "adversary",
+    "revise_from_adversary": "revise_adv",
     "quality_gate": "quality_gate",
     "rubric_gate": "rubric_gate",
+    "join_gates": "join_gates",
     "curate": "curate",
 }
 
 NODE_LABELS_COMPACT = {
     "strategy": "ST",
     "validate_seed_plan_det": "PD",
-    "select_next_seed": "SS",
+    "select_next_seed": "SC",
     "audit_seed_plan": "PA",
     "generate": "GN",
     "validate_det": "VD",
+    "adversary": "AD",
+    "revise_from_adversary": "RV",
     "quality_gate": "QG",
     "rubric_gate": "RG",
+    "join_gates": "JG",
     "curate": "CU",
 }
 
@@ -53,6 +75,7 @@ STAGE_TO_NODE = {
     "plan_audit": "audit_seed_plan",
     "generation": "generate",
     "validation_det": "validate_det",
+    "adversary": "adversary",
     "quality_gate": "quality_gate",
     "rubric_gate": "rubric_gate",
     "curation": "curate",
@@ -63,7 +86,9 @@ ROLE_TO_NODE = {
     "validate_seed_plan_deterministically": "validate_seed_plan_det",
     "audit_seed_plan": "audit_seed_plan",
     "generate_candidate_sample": "generate",
+    "revise_candidate_from_adversary": "revise_from_adversary",
     "validate_candidate_deterministically": "validate_det",
+    "adversary_attack_report": "adversary",
     "quality_gate_candidate": "quality_gate",
     "rubric_gate_candidate": "rubric_gate",
     "curate_committed_sample": "curate",
@@ -73,6 +98,8 @@ NODE_AGENT_NAMES = {
     "strategy": "Strategist",
     "audit_seed_plan": "PlanAuditor",
     "generate": "SampleGenerator",
+    "adversary": "Adversary",
+    "revise_from_adversary": "SampleGenerator",
     "quality_gate": "QualityGate",
     "rubric_gate": "RubricGate",
 }
@@ -105,8 +132,11 @@ _CX_FULL = {
     "audit_seed_plan": 46,
     "generate": 46,
     "validate_det": 46,
-    "quality_gate": 46,
-    "rubric_gate": 46,
+    "adversary": 46,
+    "revise_from_adversary": 46,
+    "quality_gate": 28,
+    "rubric_gate": 64,
+    "join_gates": 46,
     "curate": 46,
 }
 
@@ -117,24 +147,30 @@ _CX_COMPACT = {
     "audit_seed_plan": 24,
     "generate": 24,
     "validate_det": 24,
-    "quality_gate": 24,
-    "rubric_gate": 24,
+    "adversary": 24,
+    "revise_from_adversary": 24,
+    "quality_gate": 12,
+    "rubric_gate": 36,
+    "join_gates": 24,
     "curate": 24,
 }
 
 _BY = {
     "strategy": 0,
     "validate_seed_plan_det": 4,
-    "select_next_seed": 8,
-    "audit_seed_plan": 12,
-    "generate": 16,
-    "validate_det": 20,
-    "quality_gate": 24,
-    "rubric_gate": 28,
-    "curate": 32,
+    "select_next_seed": 7,
+    "audit_seed_plan": 8,
+    "generate": 12,
+    "validate_det": 16,
+    "adversary": 20,
+    "revise_from_adversary": 24,
+    "quality_gate": 30,
+    "rubric_gate": 30,
+    "join_gates": 35,
+    "curate": 38,
 }
 
-_CANVAS_H = 38
+_CANVAS_H = 44
 
 
 def _term_width() -> int:
@@ -186,11 +222,11 @@ class _Canvas:
         return "\n".join(lines)
 
 
-def _draw_box(c: _Canvas, cx: int, y: int, label: str, color: str | None) -> None:
-    width = len(label) + 4
+def _draw_box(c: _Canvas, cx: int, y: int, label: str, color: str | None, width: int | None = None) -> None:
+    width = width or len(label) + 4
     x = cx - width // 2
     c.put(x, y, "┌" + "─" * (width - 2) + "┐", color)
-    c.put(x, y + 1, f"│ {label} │", color)
+    c.put(x, y + 1, "│" + label.center(width - 2) + "│", color)
     c.put(x, y + 2, "└" + "─" * (width - 2) + "┘", color)
 
 
@@ -210,11 +246,22 @@ def _status_color(status: str) -> str | None:
 
 def _render_connectors(c: _Canvas, cx: dict[str, int], compact: bool, labels: dict[str, str]) -> None:
     center = cx["strategy"]
-    for upper, lower in zip(NODE_ORDER, NODE_ORDER[1:]):
-        x = cx[upper]
-        c.put(x, _BY[upper] + 2, "┬")
-        _vline(c, x, _BY[upper] + 3, _BY[lower] - 1)
-        c.put(cx[lower], _BY[lower], "┴")
+    serial_nodes = [
+        "strategy",
+        "validate_seed_plan_det",
+        "audit_seed_plan",
+        "generate",
+        "validate_det",
+        "adversary",
+        "revise_from_adversary",
+    ]
+    for upper, lower in zip(serial_nodes, serial_nodes[1:]):
+        c.put(center, _BY[upper] + 2, "┬")
+        _vline(c, center, _BY[upper] + 3, _BY[lower] - 1)
+        c.put(center, _BY[lower], "┴")
+
+    cursor_label = "seed cursor" if not compact else "seed"
+    c.put(center - len(cursor_label) // 2, _BY["select_next_seed"], cursor_label, DIM)
 
     left = 6 if compact else 16
     right = 42 if compact else 78
@@ -234,32 +281,65 @@ def _render_connectors(c: _Canvas, cx: dict[str, int], compact: bool, labels: di
 
     # Generation retry: det/quality/rubric rejects can route back to generation.
     generate_l = center - _roff("generate")
-    c.put(left, 22, "┌")
-    _vline(c, left, 19, 21)
-    c.put(left, 18, "└")
-    _hline(c, 22, left + 1, center)
-    _hline(c, 18, left + 1, generate_l)
-    c.put(generate_l - 1, 18, "→")
-    c.put(left, 23, "retry sample", DIM)
+    c.put(left, 36, "┌")
+    _vline(c, left, 15, 35)
+    c.put(left, 14, "└")
+    _hline(c, 36, left + 1, center)
+    _hline(c, 14, left + 1, generate_l)
+    c.put(generate_l - 1, 14, "→")
+    c.put(left, 37, "retry sample", DIM)
+
+    # Adversary revision is a validation side loop; revised samples re-enter deterministic validation.
+    validate_r = center + _roff("validate_det")
+    revise_r = center + _roff("revise_from_adversary")
+    loop_right = 68 if not compact else 40
+    c.put(loop_right, 26, "┘")
+    _vline(c, loop_right, 18, 26)
+    c.put(loop_right, 18, "┐")
+    _hline(c, 26, revise_r, loop_right - 1)
+    _hline(c, 18, validate_r, loop_right - 1)
+    c.put(validate_r + 1, 18, "←")
+    if not compact:
+        c.put(loop_right - 7, 25, "recheck", DIM)
+
+    # Accepted deterministic validation fans out to parallel semantic gates, then joins.
+    qx = cx["quality_gate"]
+    rx = cx["rubric_gate"]
+    jy = _BY["join_gates"]
+    c.put(center, _BY["revise_from_adversary"] + 2, "┬")
+    _vline(c, center, _BY["revise_from_adversary"] + 3, 28)
+    c.put(center, 29, "┬")
+    _hline(c, 29, qx, rx)
+    c.put(qx, 29, "┴")
+    c.put(rx, 29, "┴")
+    c.put(center - 5, 28, "parallel", DIM)
+    _vline(c, qx, _BY["quality_gate"] + 3, jy - 1)
+    _vline(c, rx, _BY["rubric_gate"] + 3, jy - 1)
+    _hline(c, jy, qx, rx)
+    c.put(qx, jy, "┴")
+    c.put(rx, jy, "┴")
+    c.put(center, jy, "┬")
+    c.put(center - 5, jy + 1, "join gates", DIM)
+    _vline(c, center, jy + 2, _BY["curate"] - 1)
+    c.put(center, _BY["curate"], "┴")
 
     # Curation loops to the next seed, or back to strategy when no seeds remain.
     curate_r = center + _roff("curate")
-    select_seed_r = center + _roff("select_next_seed")
     strategy_r = center + _roff("strategy")
 
-    _hline(c, 34, curate_r, right)
-    c.put(right, 34, "┘")
-    _vline(c, right, 2, 34)
-    c.put(right, 10, "┤")
-    _hline(c, 10, select_seed_r, right)
-    c.put(select_seed_r + 1, 10, "←")
+    _hline(c, 41, curate_r, right)
+    c.put(right, 41, "┘")
+    _vline(c, right, 2, 41)
+    c.put(right, 7, "┤")
+    _hline(c, 7, center + len(cursor_label) // 2 + 1, right)
+    c.put(center + len(cursor_label) // 2 + 2, 7, "←")
     c.put(right - 11, 9, "next seed", DIM)
     c.put(right, 2, "┤")
     _hline(c, 2, strategy_r, right)
     c.put(strategy_r + 1, 2, "←")
     c.put(right - 10, 1, "new plan", DIM)
 
-    c.put(center - 1, 36, "END", DIM)
+    c.put(center - 1, 42, "END", DIM)
 
 
 def render_graph(
@@ -274,7 +354,7 @@ def render_graph(
 
     canvas = _Canvas(width, _CANVAS_H)
     _render_connectors(canvas, cx, compact, labels)
-    for node in NODE_ORDER:
+    for node in STAGE_NODE_ORDER:
         _draw_box(canvas, cx[node], _BY[node], labels[node], _status_color(node_status[node]))
 
     running_agents = [
@@ -301,7 +381,7 @@ def render_graph(
     if compact:
         lines.extend([
             "",
-            " ".join(f"{NODE_LABELS_COMPACT[n]}={NODE_LABELS_FULL[n]}" for n in NODE_ORDER),
+            " ".join(f"{NODE_LABELS_COMPACT[n]}={NODE_LABELS_FULL[n]}" for n in STAGE_NODE_ORDER),
         ])
     if recent:
         lines.extend(["", "─" * min(width, 80), *recent[-5:]])
@@ -375,8 +455,9 @@ def _handle_progress(
     if node == "select_next_seed" and data.get("id"):
         stats["seed"] = data["id"]
     if progress_event in {"start", "select"}:
+        parallel_nodes = {"quality_gate", "rubric_gate"}
         for existing, status in list(node_status.items()):
-            if status == "running":
+            if status == "running" and not (node in parallel_nodes and existing in parallel_nodes):
                 node_status[existing] = "local" if existing in {"validate_seed_plan_det", "validate_det", "curate"} else "pending"
         node_status[node] = "running"
         recent.append(_progress_line(stage, progress_event, data))

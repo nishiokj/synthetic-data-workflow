@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -30,6 +30,7 @@ class AgentRole(str, Enum):
     STRATEGIST = "strategist"
     PLAN_AUDITOR = "plan_auditor"
     SAMPLE_GENERATOR = "sample_generator"
+    ADVERSARY = "adversary"
     SEMANTIC_VALIDATOR = "semantic_validator"
     QUALITY_GATE = "quality_gate"
     RUBRIC_GATE = "rubric_gate"
@@ -77,21 +78,21 @@ class TaxonomyCell(BaseModel):
 class EvidenceRef(BaseModel):
     source: str
     path: str
-    value: str | None = None
+    value: Optional[str] = None
 
 
 class CheckResult(BaseModel):
     check_id: str
     passed: bool
     route_code: RouteCode = RouteCode.ACCEPT
-    subcode: str | None = None
+    subcode: Optional[str] = None
     evidence: list[EvidenceRef] = Field(default_factory=list)
 
 
 class InnerInput(BaseModel):
     question: str
     claimed_answer: str
-    context: str | None = None
+    context: Optional[str] = None
 
 
 class InnerCriteria(BaseModel):
@@ -110,7 +111,7 @@ class SeedSpec(BaseModel):
     diagnostic_pressure: str
     scoring_strategy: str
     leakage_risk: str
-    parent_plan_id: str | None = None
+    parent_plan_id: Optional[str] = None
     content_hash: str
 
     @classmethod
@@ -122,11 +123,11 @@ class SeedSpec(BaseModel):
         intent: str,
         ability: str,
         environment: str,
-        environment_seed: dict[str, Any] | None = None,
+        environment_seed: Optional[dict[str, Any]] = None,
         diagnostic_pressure: str,
         scoring_strategy: str,
         leakage_risk: str,
-        parent_plan_id: str | None = None,
+        parent_plan_id: Optional[str] = None,
     ) -> "SeedSpec":
         content_hash = stable_hash(
             {
@@ -211,6 +212,15 @@ class CandidateSample(BaseModel):
         return self
 
 
+class AdversaryReport(BaseModel):
+    candidate_id: str
+    attack_summary: str = ""
+    attacks: list[dict[str, Any]] = Field(default_factory=list)
+    cheap_pass_strategy: str = ""
+    proxy_damage: str = ""
+    survival_requirements: list[str] = Field(default_factory=list)
+
+
 class SampleVerdict(BaseModel):
     candidate_id: str
     check_kind: Literal["deterministic", "semantic", "quality", "rubric", "curation"]
@@ -239,7 +249,7 @@ class CommittedSample(BaseModel):
     deterministic_checks: list[CheckResult]
     semantic_checks: list[SampleVerdict]
     embedding_ref: str
-    nn_distance: float | None
+    nn_distance: Optional[float]
     taxonomy_cell: TaxonomyCell
 
 
@@ -250,10 +260,10 @@ class RoutingDecision(BaseModel):
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)
-    next_stage: StageKind | None
+    next_stage: Optional[StageKind]
     context_policy: ContextPolicy
     retry_index: int
-    attempt_of: str | None = None
+    attempt_of: Optional[str] = None
     terminal: bool = False
 
 
@@ -262,8 +272,8 @@ class StageRecord(BaseModel):
     stage_id: str
     role: str
     stage_kind: StageKind
-    agent_role: AgentRole | None = None
-    parent_artifact_id: str | None = None
+    agent_role: Optional[AgentRole] = None
+    parent_artifact_id: Optional[str] = None
     artifact_id: str
     model: str
     provider: str
@@ -272,7 +282,7 @@ class StageRecord(BaseModel):
     output_tokens: int = 0
     latency_ms: int = 0
     cost_usd: float = 0.0
-    reasoning_effort: str | None = None
+    reasoning_effort: Optional[str] = None
     text_normalization_replacements: int = 0
     verdict: Verdict
     route_code: RouteCode
@@ -281,7 +291,7 @@ class StageRecord(BaseModel):
     criteria_hash: str
     context_policy: ContextPolicy
     retry_index: int = 0
-    attempt_of: str | None = None
+    attempt_of: Optional[str] = None
     wallclock_ts: str = Field(default_factory=utc_now_iso)
 
 

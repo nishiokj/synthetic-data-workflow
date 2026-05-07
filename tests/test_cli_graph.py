@@ -12,12 +12,17 @@ def test_render_graph_contains_pipeline_nodes(monkeypatch) -> None:
 
     assert "strategy" in output
     assert "plan_det" in output
-    assert "select_seed" in output
+    assert "select_seed" not in output
+    assert "seed cursor" in output
     assert "plan_audit" in output
     assert "generate" in output
     assert "validate_det" in output
+    assert "adversary" in output
+    assert "revise_adv" in output
     assert "quality_gate" in output
     assert "rubric_gate" in output
+    assert "join gates" in output
     assert "curate" in output
+    assert "parallel" in output
     assert "retry sample" in output
     assert "next seed" in output

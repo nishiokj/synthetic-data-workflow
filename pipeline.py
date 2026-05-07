@@ -4,10 +4,11 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from agents import OpenAIClient, PlanAuditor, ProviderError, QualityGate, RubricGate, SampleGenerator, Strategist
+from agents import Adversary, OpenAIClient, PlanAuditor, ProviderError, QualityGate, RubricGate, SampleGenerator, Strategist
 from config import RuntimeConfig
 from models import (
     AgentRole,
+    AdversaryReport,
     CandidateSample,
     CertifiedSample,
     CheckResult,
@@ -46,6 +47,8 @@ class PipelineState(TypedDict, total=False):
     candidate: CandidateSample | None
     det_checks: list[CheckResult]
     det_accepted: bool
+    adversary_done: bool
+    adversary_report: AdversaryReport | None
     quality_verdict: SampleVerdict | None
     rubric_verdict: SampleVerdict | None
     last_decision: RoutingDecision | None
@@ -110,6 +113,8 @@ def after_audit_seed_plan(state: PipelineState) -> str:
 
 def after_validate_det(state: PipelineState) -> str | list[str]:
     if state["det_accepted"]:
+        if not state.get("adversary_done"):
+            return "adversary"
         return ["quality_gate", "rubric_gate"]
     decision = state["last_decision"]
     if decision and decision.terminal:
@@ -122,6 +127,10 @@ def after_generate(state: PipelineState) -> str:
     if decision and decision.terminal:
         return after_terminal_seed(state)
     return route_from_decision(state)
+
+
+def after_adversary(state: PipelineState) -> str:
+    return "revise_from_adversary"
 
 
 def after_gate_join(state: PipelineState) -> str:
@@ -143,6 +152,7 @@ class PipelineRunner:
         self.strategist = Strategist(self.client, config.domain)
         self.plan_auditor = PlanAuditor(self.client, config.domain)
         self.generator = SampleGenerator(self.client, config.domain)
+        self.adversary = Adversary(self.client, config.domain)
         self.quality_gate = QualityGate(self.client, config.domain)
         self.rubric_gate = RubricGate(self.client, config.domain)
         self.graph = self._build_graph().compile()
@@ -155,6 +165,8 @@ class PipelineRunner:
         graph.add_node("audit_seed_plan", self.node_audit_seed_plan)
         graph.add_node("generate", self.node_generate)
         graph.add_node("validate_det", self.node_validate_det)
+        graph.add_node("adversary", self.node_adversary)
+        graph.add_node("revise_from_adversary", self.node_revise_from_adversary)
         graph.add_node("quality_gate", self.node_quality_gate)
         graph.add_node("rubric_gate", self.node_rubric_gate)
         graph.add_node("join_gates", self.node_join_gates)
@@ -166,6 +178,8 @@ class PipelineRunner:
         graph.add_conditional_edges("audit_seed_plan", after_audit_seed_plan)
         graph.add_conditional_edges("generate", after_generate)
         graph.add_conditional_edges("validate_det", after_validate_det)
+        graph.add_conditional_edges("adversary", after_adversary)
+        graph.add_edge("revise_from_adversary", "validate_det")
         graph.add_edge(["quality_gate", "rubric_gate"], "join_gates")
         graph.add_conditional_edges("join_gates", after_gate_join)
         graph.add_conditional_edges("curate", after_curate)
@@ -191,6 +205,7 @@ class PipelineRunner:
             "gen_retry_subcodes": [],
             "det_checks": [],
             "det_accepted": False,
+            "adversary_done": False,
             "committed_count": 0,
             "dropped_count": 0,
         }
@@ -341,6 +356,8 @@ class PipelineRunner:
             "candidate": None,
             "det_checks": [],
             "det_accepted": False,
+            "adversary_done": False,
+            "adversary_report": None,
             "quality_verdict": None,
             "rubric_verdict": None,
             "last_decision": None,
@@ -457,10 +474,18 @@ class PipelineRunner:
             meta=gen_meta,
             retry_index=retry_index,
         )
+        self._append_candidate_snapshot(
+            candidate,
+            phase="generated",
+            role="generate_candidate_sample",
+            retry_index=retry_index,
+        )
         self._progress("candidate", "generated", **_candidate_progress(candidate))
         return {
             "candidate": candidate,
             "det_accepted": False,
+            "adversary_done": False,
+            "adversary_report": None,
             "quality_verdict": None,
             "rubric_verdict": None,
             "last_decision": decision,
@@ -516,6 +541,139 @@ class PipelineRunner:
             update["gen_retry_route_code"] = decision.route_code
             update["gen_retry_subcodes"] = decision.subcodes
         return update
+
+    def node_adversary(self, state: PipelineState) -> PipelineState:
+        candidate = _require(state.get("candidate"), "candidate")
+        self._progress("adversary", "start", candidate=candidate.id)
+        report, meta = self.adversary.attack(candidate)
+        self.writer.append_adversary_report(report)
+        self._record(
+            stage_kind=StageKind.VALIDATION,
+            role="adversary_attack_report",
+            agent_role=AgentRole.ADVERSARY,
+            artifact_id=f"{candidate.id}-adversary-report",
+            parent_artifact_id=candidate.id,
+            verdict=Verdict.ACCEPT,
+            route_code=RouteCode.ACCEPT,
+            context_policy=ContextPolicy.CRITERIA_ONLY,
+            meta=meta,
+            retry_index=state["gen_attempt"],
+        )
+        self._progress(
+            "adversary",
+            "reported",
+            candidate=candidate.id,
+            attacks=len(report.attacks),
+        )
+        return {"adversary_report": report, "last_decision": None}
+
+    def node_revise_from_adversary(self, state: PipelineState) -> PipelineState:
+        seed = _require(state.get("seed"), "seed")
+        candidate = _require(state.get("candidate"), "candidate")
+        report = _require(state.get("adversary_report"), "adversary_report")
+        attempt = state["gen_attempt"] + 1
+        self._progress(
+            "generation",
+            "revise",
+            seed=seed.id,
+            candidate=candidate.id,
+            attacks=len(report.attacks),
+        )
+        try:
+            revised, meta = self.generator.revise_from_attack(
+                run_id=self.config.run_id,
+                seed=seed,
+                candidate=candidate,
+                report=report,
+                attempt=attempt,
+            )
+        except ProviderError as exc:
+            decision = route_after(
+                run_id=self.config.run_id,
+                from_stage=StageKind.GENERATION,
+                verdict=Verdict.REJECT,
+                route_code=RouteCode.RETRY_INFRA,
+                retry_index=state["gen_attempt"],
+                max_generation_retries=self.config.domain.max_generation_retries,
+                subcodes=["provider_error"],
+                reason_codes=["provider_error"],
+            )
+            self._record(
+                stage_kind=StageKind.GENERATION,
+                role="revise_candidate_from_adversary",
+                agent_role=AgentRole.SAMPLE_GENERATOR,
+                artifact_id=f"{candidate.id}-adversary-revision-error",
+                parent_artifact_id=candidate.id,
+                verdict=Verdict.REJECT,
+                route_code=decision.route_code,
+                subcodes=["provider_error"],
+                reason_codes=["provider_error"],
+                context_policy=ContextPolicy.CRITERIA_PLUS_ROUTE_CODE,
+                meta=_local_meta(error=str(exc)),
+                retry_index=state["gen_attempt"],
+            )
+            update: PipelineState = {"last_decision": decision, "adversary_done": True}
+            if decision.terminal:
+                update["dropped_count"] = state["dropped_count"] + 1
+            else:
+                update["gen_attempt"] = state["gen_attempt"] + 1
+                update["gen_retry_route_code"] = decision.route_code
+                update["gen_retry_subcodes"] = decision.subcodes
+            return update
+
+        self._record(
+            stage_kind=StageKind.GENERATION,
+            role="revise_candidate_from_adversary",
+            agent_role=AgentRole.SAMPLE_GENERATOR,
+            artifact_id=revised.id,
+            parent_artifact_id=candidate.id,
+            verdict=Verdict.ACCEPT,
+            route_code=RouteCode.ACCEPT,
+            context_policy=ContextPolicy.CRITERIA_PLUS_ROUTE_CODE,
+            meta=meta,
+            retry_index=state["gen_attempt"],
+        )
+        self._append_candidate_snapshot(
+            revised,
+            phase="adversary_revision",
+            role="revise_candidate_from_adversary",
+            retry_index=state["gen_attempt"],
+            parent_candidate_id=candidate.id,
+            adversary_report_id=f"{candidate.id}-adversary-report",
+        )
+        self._progress("candidate", "revised", **_candidate_progress(revised))
+        return {
+            "candidate": revised,
+            "det_accepted": False,
+            "adversary_done": True,
+            "quality_verdict": None,
+            "rubric_verdict": None,
+            "last_decision": None,
+        }
+
+    def _append_candidate_snapshot(
+        self,
+        candidate: CandidateSample,
+        *,
+        phase: str,
+        role: str,
+        retry_index: int,
+        parent_candidate_id: str | None = None,
+        adversary_report_id: str | None = None,
+    ) -> None:
+        self.writer.append_candidate(
+            {
+                "run_id": self.config.run_id,
+                "phase": phase,
+                "role": role,
+                "candidate_id": candidate.id,
+                "seed_id": candidate.seed_id,
+                "parent_candidate_id": parent_candidate_id,
+                "adversary_report_id": adversary_report_id,
+                "retry_index": retry_index,
+                "candidate": candidate.model_dump(mode="json"),
+            }
+        )
 
     def node_quality_gate(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")

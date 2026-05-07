@@ -10,6 +10,7 @@ from typing import Any
 
 from config import DomainConfig, ModelConfig
 from models import (
+    AdversaryReport,
     CandidateSample,
     EvidenceRef,
     PlanVerdict,
@@ -527,6 +528,135 @@ class SampleGenerator:
             provenance={"seed_id": seed.id, "generator": self.role_name},
         )
         return candidate, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
+
+    def revise_from_attack(
+        self,
+        *,
+        run_id: str,
+        seed: SeedSpec,
+        candidate: CandidateSample,
+        report: AdversaryReport,
+        attempt: int,
+    ) -> tuple[CandidateSample, dict[str, Any]]:
+        system = (
+            self._system
+            + "\n\nREVISION MODE\n"
+            "You are revising your own benchmark candidate after a hostile adversary attacked it. "
+            "The adversary is not helping you and is not responsible for improvements. Treat its report as an attack surface map. "
+            "Revise the benchmark so the listed cheap-pass strategies, leakage paths, scoring exploits, and proxy failures no longer work. "
+            "Preserve the seed's intended ability and environment. Return a complete replacement JSON object matching the required schema. "
+            "Do not include meta-discussion about the adversary or the revision process in candidate-facing materials. Return JSON only."
+        )
+        user_payload = {
+            "seed": seed.model_dump(mode="json"),
+            "prior_candidate": candidate.model_dump(mode="json"),
+            "adversary_attack_report": report.model_dump(mode="json"),
+            "domain": {
+                "output_schema": self.domain.output_schema,
+                "benchmark_case_schema": self.domain.benchmark_case_schema,
+                "abilities": self.domain.abilities,
+                "environments": self.domain.environments,
+                "diagnostic_pressure_types": self.domain.diagnostic_pressure_types,
+                "scoring_methods": self.domain.scoring_methods,
+            },
+            "required_json_schema": self.domain.output_schema,
+        }
+        user = json.dumps(user_payload, sort_keys=True)
+        payload, meta = self.client.complete_json(system=system, user=user, temperature=0.6)
+        content = {
+            "seed_id": seed.id,
+            "cell": seed.cell.model_dump(),
+            "output": payload,
+            "benchmark_case": payload.get("benchmark_case", {}),
+            "score_x": payload.get("score_x", {}),
+            "ability_z": payload.get("ability_z", {}),
+            "environment_y": payload.get("environment_y", {}),
+            "proxy_claim": payload.get("proxy_claim", ""),
+            "diagnostic_pressure": list(payload.get("diagnostic_pressure", [])),
+            "scoring_contract": payload.get("scoring_contract", {}),
+            "leakage_risks": list(payload.get("leakage_risks", [])),
+            "known_limits": list(payload.get("known_limits", [])),
+            "coverage_tags": list(payload.get("coverage_tags", [])),
+            "negative_controls": list(payload.get("negative_controls", [])),
+            "revision_of": candidate.id,
+            "adversary_report": report.model_dump(mode="json"),
+        }
+        revised = CandidateSample(
+            id=f"{run_id}-candidate-{seed.id}-{attempt}-rev",
+            seed_id=seed.id,
+            content_hash=stable_hash(content),
+            cell=seed.cell,
+            output=dict(payload),
+            benchmark_case=dict(payload.get("benchmark_case", {})),
+            score_x=dict(payload.get("score_x", {})),
+            ability_z=dict(payload.get("ability_z", {})),
+            environment_y=dict(payload.get("environment_y", {})),
+            proxy_claim=str(payload.get("proxy_claim", "")),
+            diagnostic_pressure=list(payload.get("diagnostic_pressure", [])),
+            scoring_contract=dict(payload.get("scoring_contract", {})),
+            leakage_risks=list(payload.get("leakage_risks", [])),
+            known_limits=list(payload.get("known_limits", [])),
+            coverage_tags=list(payload.get("coverage_tags", [])),
+            negative_controls=list(payload.get("negative_controls", [])),
+            difficulty=seed.cell.difficulty,
+            case_type=seed.cell.case_type,
+            provenance={"seed_id": seed.id, "generator": self.role_name, "revision_of": candidate.id},
+        )
+        return revised, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
+
+
+class Adversary:
+    role_name = "Adversary"
+    system_prompt = (
+        "You are the Adversary for a benchmark-generation pipeline. "
+        "You are not a gate, not a reviewer, and not an improver. Your only job is to attack the benchmark candidate. "
+        "Find how the benchmark can be passed cheaply, gamed, leaked, misread, overclaimed, or made meaningless. "
+        "Do not rewrite the benchmark and do not offer helpful edits. You may state survival requirements: conditions that would have to become true for your attack to fail. "
+        "Attack candidate-facing prompt, files, comments, tests, fixture names, visible outputs, scoring criteria, negative controls, proxy claims, and known limits. "
+        "Prioritize answer leakage, trivial core repairs, fake difficulty, vague scoring, missing operational checks, overbroad proxy claims, and shallow pass strategies. "
+        "Return JSON only. Do not reveal hidden chain-of-thought."
+    )
+
+    def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
+        self.client = client
+        self.domain = domain
+
+    def attack(self, candidate: CandidateSample) -> tuple[AdversaryReport, dict[str, Any]]:
+        payload = {
+            "candidate": candidate.model_dump(mode="json"),
+            "attack_surface": {
+                "domain_id": self.domain.domain_id,
+                "general_probe_principles": self.domain.general_probe_principles,
+                "anti_overfit_policy": self.domain.anti_overfit_policy,
+                "common_rejection_patterns": self.domain.generator_guidance.get("common_rejection_patterns", []),
+            },
+            "required_json_shape": {
+                "attack_summary": "short hostile summary of how this benchmark can be defeated",
+                "attacks": [
+                    {
+                        "attack_type": "answer_leakage | cheap_pass | scoring_ambiguity | fake_difficulty | proxy_overclaim | other",
+                        "exploit_path": "how a weak evaluated agent or bad grader can exploit the benchmark",
+                        "evidence": "specific candidate-facing field/path/span",
+                        "severity": "critical | high | medium | low",
+                        "why_it_invalidates_proxy": "why this damages score_x as evidence of ability_z",
+                    }
+                ],
+                "cheap_pass_strategy": "most likely cheap strategy for getting a high score without the target ability",
+                "proxy_damage": "how badly these attacks damage the benchmark's proxy claim",
+                "survival_requirements": ["conditions that would have to hold for the attack to fail"],
+            },
+        }
+        user = json.dumps(payload, sort_keys=True)
+        raw, meta = self.client.complete_json(system=self.system_prompt, user=user, temperature=0.2)
+        report = AdversaryReport(
+            candidate_id=candidate.id,
+            attack_summary=str(raw.get("attack_summary", "")),
+            attacks=list(raw.get("attacks", [])),
+            cheap_pass_strategy=str(raw.get("cheap_pass_strategy", "")),
+            proxy_damage=str(raw.get("proxy_damage", "")),
+            survival_requirements=list(raw.get("survival_requirements", [])),
+        )
+        return report, {**meta, "prompt_hash": stable_hash({"system": self.system_prompt, "user": user})}
 
 
 class _GateValidator:
