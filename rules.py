@@ -17,26 +17,26 @@ from models import (
 from text_hygiene import find_disallowed_text
 
 
-def validate_seed_plan(seeds: list[Any], domain: DomainConfig) -> tuple[Verdict, RouteCode, list[str]]:
+def validate_design_batch(designs: list[Any], domain: DomainConfig) -> tuple[Verdict, RouteCode, list[str]]:
     seen: set[str] = set()
-    for seed in seeds:
-        cell = seed.cell
+    for design in designs:
+        cell = design.cell
         if cell.case_type not in domain.case_types:
             return Verdict.REJECT, RouteCode.REJECT_COVERAGE_MISMATCH, ["unknown_case_type"]
         if cell.difficulty not in domain.difficulties:
             return Verdict.REJECT, RouteCode.REJECT_COVERAGE_MISMATCH, ["unknown_difficulty"]
         if cell.scenario not in domain.scenarios:
             return Verdict.REJECT, RouteCode.REJECT_COVERAGE_MISMATCH, ["unknown_scenario"]
-        if seed.content_hash in seen:
-            return Verdict.REJECT, RouteCode.REJECT_DUPLICATE, ["duplicate_seed"]
-        seed_environment_verdict = _validate_seed_environment(seed, domain)
-        if seed_environment_verdict is not None:
-            return seed_environment_verdict
-        seen.add(seed.content_hash)
+        if design.content_hash in seen:
+            return Verdict.REJECT, RouteCode.REJECT_DUPLICATE, ["duplicate_design"]
+        design_environment_verdict = _validate_design_environment(design, domain)
+        if design_environment_verdict is not None:
+            return design_environment_verdict
+        seen.add(design.content_hash)
     return Verdict.ACCEPT, RouteCode.ACCEPT, []
 
 
-_CODE_ENV_SEED_REQUIRED_FIELDS = {
+_CODE_ENV_DESIGN_REQUIRED_FIELDS = {
     "product_context",
     "codebase_shape",
     "state_model",
@@ -45,10 +45,9 @@ _CODE_ENV_SEED_REQUIRED_FIELDS = {
     "tempting_wrong_fix",
     "actual_causal_region",
     "required_depth",
-    "non_goals",
 }
 
-_TOY_CODE_SEED_MARKERS = {
+_TOY_CODE_DESIGN_MARKERS = {
     "typo",
     "missing import",
     "off-by-one",
@@ -58,21 +57,31 @@ _TOY_CODE_SEED_MARKERS = {
 }
 
 
-def _validate_seed_environment(seed: Any, domain: DomainConfig) -> tuple[Verdict, RouteCode, list[str]] | None:
+def _validate_design_environment(design: Any, domain: DomainConfig) -> tuple[Verdict, RouteCode, list[str]] | None:
     if domain.domain_id != "benchmark_code_debug":
         return None
 
-    env_seed = getattr(seed, "environment_seed", {}) or {}
-    if not isinstance(env_seed, dict):
+    env_design = getattr(design, "environment_premise", {}) or {}
+    if not isinstance(env_design, dict):
         return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
 
-    missing = [field for field in sorted(_CODE_ENV_SEED_REQUIRED_FIELDS) if not env_seed.get(field)]
+    missing = [field for field in sorted(_CODE_ENV_DESIGN_REQUIRED_FIELDS) if not env_design.get(field)]
     if missing:
         return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
+    list_fields = (
+        "diagnostic_pressure",
+        "why_weak_agents_fail",
+        "tempting_shallow_solutions",
+        "success_evidence_required",
+        "minimum_depth_requirements",
+        "forbidden_shortcuts",
+        "non_goals",
+    )
+    if any(not getattr(design, field, []) for field in list_fields):
+        return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
 
-    core_fields = _CODE_ENV_SEED_REQUIRED_FIELDS - {"non_goals"}
-    core_text = " ".join(str(env_seed.get(field, "")) for field in core_fields).lower()
-    if any(marker in core_text for marker in _TOY_CODE_SEED_MARKERS):
+    core_text = " ".join(str(env_design.get(field, "")) for field in _CODE_ENV_DESIGN_REQUIRED_FIELDS).lower()
+    if any(marker in core_text for marker in _TOY_CODE_DESIGN_MARKERS):
         return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
 
     return None

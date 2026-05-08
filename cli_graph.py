@@ -10,10 +10,10 @@ from models import AgentRole, RouteCode, Verdict
 
 
 NODE_ORDER = [
-    "strategy",
-    "validate_seed_plan_det",
-    "select_next_seed",
-    "audit_seed_plan",
+    "design",
+    "validate_design_batch_det",
+    "select_next_design",
+    "audit_design",
     "generate",
     "validate_det",
     "adversary",
@@ -25,23 +25,25 @@ NODE_ORDER = [
 ]
 
 STAGE_NODE_ORDER = [
-    "strategy",
-    "validate_seed_plan_det",
-    "audit_seed_plan",
+    "design",
+    "validate_design_batch_det",
+    "select_next_design",
+    "audit_design",
     "generate",
     "validate_det",
     "adversary",
     "revise_from_adversary",
     "quality_gate",
     "rubric_gate",
+    "join_gates",
     "curate",
 ]
 
 NODE_LABELS_FULL = {
-    "strategy": "strategy",
-    "validate_seed_plan_det": "plan_det",
-    "select_next_seed": "seed_cursor",
-    "audit_seed_plan": "plan_audit",
+    "design": "design",
+    "validate_design_batch_det": "design_det",
+    "select_next_design": "design_cursor",
+    "audit_design": "design_audit",
     "generate": "generate",
     "validate_det": "validate_det",
     "adversary": "adversary",
@@ -53,10 +55,10 @@ NODE_LABELS_FULL = {
 }
 
 NODE_LABELS_COMPACT = {
-    "strategy": "ST",
-    "validate_seed_plan_det": "PD",
-    "select_next_seed": "SC",
-    "audit_seed_plan": "PA",
+    "design": "DG",
+    "validate_design_batch_det": "DD",
+    "select_next_design": "DC",
+    "audit_design": "DA",
     "generate": "GN",
     "validate_det": "VD",
     "adversary": "AD",
@@ -69,22 +71,23 @@ NODE_LABELS_COMPACT = {
 
 STAGE_TO_NODE = {
     "run": None,
-    "strategy": "strategy",
-    "plan_det": "validate_seed_plan_det",
-    "seed": "select_next_seed",
-    "plan_audit": "audit_seed_plan",
+    "design": "design",
+    "design_det": "validate_design_batch_det",
+    "design_cursor": "select_next_design",
+    "design_audit": "audit_design",
     "generation": "generate",
     "validation_det": "validate_det",
     "adversary": "adversary",
     "quality_gate": "quality_gate",
     "rubric_gate": "rubric_gate",
+    "join_gates": "join_gates",
     "curation": "curate",
 }
 
 ROLE_TO_NODE = {
-    "plan_strategy_batch": "strategy",
-    "validate_seed_plan_deterministically": "validate_seed_plan_det",
-    "audit_seed_plan": "audit_seed_plan",
+    "design_batch": "design",
+    "validate_design_batch_deterministically": "validate_design_batch_det",
+    "audit_design": "audit_design",
     "generate_candidate_sample": "generate",
     "revise_candidate_from_adversary": "revise_from_adversary",
     "validate_candidate_deterministically": "validate_det",
@@ -95,8 +98,8 @@ ROLE_TO_NODE = {
 }
 
 NODE_AGENT_NAMES = {
-    "strategy": "Strategist",
-    "audit_seed_plan": "PlanAuditor",
+    "design": "Designer",
+    "audit_design": "DesignAuditor",
     "generate": "SampleGenerator",
     "adversary": "Adversary",
     "revise_from_adversary": "SampleGenerator",
@@ -105,8 +108,8 @@ NODE_AGENT_NAMES = {
 }
 
 AGENT_ROLE_NAMES = {
-    AgentRole.STRATEGIST.value: "Strategist",
-    AgentRole.PLAN_AUDITOR.value: "PlanAuditor",
+    AgentRole.DESIGNER.value: "Designer",
+    AgentRole.DESIGN_AUDITOR.value: "DesignAuditor",
     AgentRole.SAMPLE_GENERATOR.value: "SampleGenerator",
     AgentRole.SEMANTIC_VALIDATOR.value: "SemanticValidator",
     AgentRole.QUALITY_GATE.value: "QualityGate",
@@ -126,10 +129,10 @@ DIM = "\033[90m"
 MIN_FULL_WIDTH = 92
 
 _CX_FULL = {
-    "strategy": 46,
-    "validate_seed_plan_det": 46,
-    "select_next_seed": 46,
-    "audit_seed_plan": 46,
+    "design": 46,
+    "validate_design_batch_det": 46,
+    "select_next_design": 46,
+    "audit_design": 46,
     "generate": 46,
     "validate_det": 46,
     "adversary": 46,
@@ -141,10 +144,10 @@ _CX_FULL = {
 }
 
 _CX_COMPACT = {
-    "strategy": 24,
-    "validate_seed_plan_det": 24,
-    "select_next_seed": 24,
-    "audit_seed_plan": 24,
+    "design": 24,
+    "validate_design_batch_det": 24,
+    "select_next_design": 24,
+    "audit_design": 24,
     "generate": 24,
     "validate_det": 24,
     "adversary": 24,
@@ -156,21 +159,21 @@ _CX_COMPACT = {
 }
 
 _BY = {
-    "strategy": 0,
-    "validate_seed_plan_det": 4,
-    "select_next_seed": 7,
-    "audit_seed_plan": 8,
-    "generate": 12,
-    "validate_det": 16,
-    "adversary": 20,
-    "revise_from_adversary": 24,
-    "quality_gate": 30,
-    "rubric_gate": 30,
-    "join_gates": 35,
-    "curate": 38,
+    "design": 0,
+    "validate_design_batch_det": 4,
+    "select_next_design": 8,
+    "audit_design": 12,
+    "generate": 16,
+    "validate_det": 20,
+    "adversary": 24,
+    "revise_from_adversary": 28,
+    "quality_gate": 34,
+    "rubric_gate": 34,
+    "join_gates": 39,
+    "curate": 43,
 }
 
-_CANVAS_H = 44
+_CANVAS_H = 50
 
 
 def _term_width() -> int:
@@ -245,11 +248,12 @@ def _status_color(status: str) -> str | None:
 
 
 def _render_connectors(c: _Canvas, cx: dict[str, int], compact: bool, labels: dict[str, str]) -> None:
-    center = cx["strategy"]
+    center = cx["design"]
     serial_nodes = [
-        "strategy",
-        "validate_seed_plan_det",
-        "audit_seed_plan",
+        "design",
+        "validate_design_batch_det",
+        "select_next_design",
+        "audit_design",
         "generate",
         "validate_det",
         "adversary",
@@ -260,86 +264,83 @@ def _render_connectors(c: _Canvas, cx: dict[str, int], compact: bool, labels: di
         _vline(c, center, _BY[upper] + 3, _BY[lower] - 1)
         c.put(center, _BY[lower], "┴")
 
-    cursor_label = "seed cursor" if not compact else "seed"
-    c.put(center - len(cursor_label) // 2, _BY["select_next_seed"], cursor_label, DIM)
-
     left = 6 if compact else 16
     right = 42 if compact else 78
 
     def _roff(node: str) -> int:
         return (len(labels[node]) + 4) // 2
 
-    # Plan retry: deterministic seed-plan reject routes back to strategy.
-    strategy_l = center - _roff("strategy")
-    c.put(left, 5, "┌")
-    _vline(c, left, 2, 4)
+    # Design retry: deterministic design-batch reject routes back to design.
+    design_l = center - _roff("design")
+    c.put(left, 7, "┌")
+    _vline(c, left, 2, 6)
     c.put(left, 1, "└")
-    _hline(c, 5, left + 1, center)
-    _hline(c, 1, left + 1, strategy_l)
-    c.put(strategy_l - 1, 1, "→")
-    c.put(left, 6, "retry plan", DIM)
+    _hline(c, 7, left + 1, center)
+    _hline(c, 1, left + 1, design_l)
+    c.put(design_l - 1, 1, "→")
+    c.put(left, 6, "retry design", DIM)
 
     # Generation retry: det/quality/rubric rejects can route back to generation.
     generate_l = center - _roff("generate")
-    c.put(left, 36, "┌")
-    _vline(c, left, 15, 35)
-    c.put(left, 14, "└")
-    _hline(c, 36, left + 1, center)
-    _hline(c, 14, left + 1, generate_l)
-    c.put(generate_l - 1, 14, "→")
-    c.put(left, 37, "retry sample", DIM)
+    c.put(left, 42, "┌")
+    _vline(c, left, _BY["generate"] + 2, 41)
+    c.put(left, _BY["generate"] + 1, "└")
+    _hline(c, 42, left + 1, center)
+    _hline(c, _BY["generate"] + 1, left + 1, generate_l)
+    c.put(generate_l - 1, _BY["generate"] + 1, "→")
+    c.put(left, 41, "retry sample", DIM)
 
     # Adversary revision is a validation side loop; revised samples re-enter deterministic validation.
     validate_r = center + _roff("validate_det")
     revise_r = center + _roff("revise_from_adversary")
     loop_right = 68 if not compact else 40
-    c.put(loop_right, 26, "┘")
-    _vline(c, loop_right, 18, 26)
-    c.put(loop_right, 18, "┐")
-    _hline(c, 26, revise_r, loop_right - 1)
-    _hline(c, 18, validate_r, loop_right - 1)
-    c.put(validate_r + 1, 18, "←")
+    c.put(loop_right, 30, "┘")
+    _vline(c, loop_right, _BY["validate_det"] + 2, 30)
+    c.put(loop_right, _BY["validate_det"] + 2, "┐")
+    _hline(c, 30, revise_r, loop_right - 1)
+    _hline(c, _BY["validate_det"] + 2, validate_r, loop_right - 1)
+    c.put(validate_r + 1, _BY["validate_det"] + 2, "←")
     if not compact:
-        c.put(loop_right - 7, 25, "recheck", DIM)
+        c.put(loop_right - 7, 29, "recheck", DIM)
 
     # Accepted deterministic validation fans out to parallel semantic gates, then joins.
     qx = cx["quality_gate"]
     rx = cx["rubric_gate"]
     jy = _BY["join_gates"]
     c.put(center, _BY["revise_from_adversary"] + 2, "┬")
-    _vline(c, center, _BY["revise_from_adversary"] + 3, 28)
-    c.put(center, 29, "┬")
-    _hline(c, 29, qx, rx)
-    c.put(qx, 29, "┴")
-    c.put(rx, 29, "┴")
-    c.put(center - 5, 28, "parallel", DIM)
+    _vline(c, center, _BY["revise_from_adversary"] + 3, 32)
+    c.put(center, 33, "┬")
+    _hline(c, 33, qx, rx)
+    c.put(qx, 33, "┴")
+    c.put(rx, 33, "┴")
+    c.put(center - 5, 32, "parallel", DIM)
     _vline(c, qx, _BY["quality_gate"] + 3, jy - 1)
     _vline(c, rx, _BY["rubric_gate"] + 3, jy - 1)
     _hline(c, jy, qx, rx)
-    c.put(qx, jy, "┴")
-    c.put(rx, jy, "┴")
-    c.put(center, jy, "┬")
-    c.put(center - 5, jy + 1, "join gates", DIM)
-    _vline(c, center, jy + 2, _BY["curate"] - 1)
+    c.put(qx, jy, "┼")
+    c.put(rx, jy, "┼")
+    c.put(center, jy, "┴")
+    _vline(c, center, jy + 3, _BY["curate"] - 1)
     c.put(center, _BY["curate"], "┴")
 
-    # Curation loops to the next seed, or back to strategy when no seeds remain.
+    # Curation loops to the next design, or back to design when no designs remain.
     curate_r = center + _roff("curate")
-    strategy_r = center + _roff("strategy")
+    design_r = center + _roff("design")
+    cursor_r = center + _roff("select_next_design")
 
-    _hline(c, 41, curate_r, right)
-    c.put(right, 41, "┘")
-    _vline(c, right, 2, 41)
-    c.put(right, 7, "┤")
-    _hline(c, 7, center + len(cursor_label) // 2 + 1, right)
-    c.put(center + len(cursor_label) // 2 + 2, 7, "←")
-    c.put(right - 11, 9, "next seed", DIM)
+    _hline(c, 46, curate_r, right)
+    c.put(right, 46, "┘")
+    _vline(c, right, 2, 46)
+    c.put(right, _BY["select_next_design"] + 1, "┤")
+    _hline(c, _BY["select_next_design"] + 1, cursor_r, right)
+    c.put(cursor_r + 1, _BY["select_next_design"] + 1, "←")
+    c.put(right - 11, _BY["select_next_design"] + 3, "next design", DIM)
     c.put(right, 2, "┤")
-    _hline(c, 2, strategy_r, right)
-    c.put(strategy_r + 1, 2, "←")
-    c.put(right - 10, 1, "new plan", DIM)
+    _hline(c, 2, design_r, right)
+    c.put(design_r + 1, 2, "←")
+    c.put(right - 10, 1, "new design", DIM)
 
-    c.put(center - 1, 42, "END", DIM)
+    c.put(center - 1, 48, "END", DIM)
 
 
 def render_graph(
@@ -374,7 +375,7 @@ def render_graph(
             f"  target={stats.get('target', '-')}"
             f"  committed={stats.get('committed', 0)}"
             f"  dropped={stats.get('dropped', 0)}"
-            f"  seed={stats.get('seed', '-')}"
+            f"  design={stats.get('design', '-')}"
         ),
         "Legend: blue=active  green=accepted/last-ok  red=rejected  gray=pending",
     ]
@@ -390,7 +391,7 @@ def render_graph(
 
 def create_graph_callback(run_id: str) -> Callable[[str, dict[str, Any]], None]:
     node_status = {node: "pending" for node in NODE_ORDER}
-    stats: dict[str, Any] = {"run_id": run_id, "committed": 0, "dropped": 0, "seed": "-"}
+    stats: dict[str, Any] = {"run_id": run_id, "committed": 0, "dropped": 0, "design": "-"}
     recent: list[str] = []
     previous_lines = 0
     printed_recent = 0
@@ -450,15 +451,17 @@ def _handle_progress(
         return
 
     node = STAGE_TO_NODE.get(stage)
+    if stage == "generation" and progress_event == "revise":
+        node = "revise_from_adversary"
     if node is None:
         return
-    if node == "select_next_seed" and data.get("id"):
-        stats["seed"] = data["id"]
-    if progress_event in {"start", "select"}:
+    if node == "select_next_design" and data.get("id"):
+        stats["design"] = data["id"]
+    if progress_event in {"start", "select", "revise"}:
         parallel_nodes = {"quality_gate", "rubric_gate"}
         for existing, status in list(node_status.items()):
             if status == "running" and not (node in parallel_nodes and existing in parallel_nodes):
-                node_status[existing] = "local" if existing in {"validate_seed_plan_det", "validate_det", "curate"} else "pending"
+                node_status[existing] = "local" if existing in {"validate_design_batch_det", "validate_det", "curate"} else "pending"
         node_status[node] = "running"
         recent.append(_progress_line(stage, progress_event, data))
 
@@ -483,7 +486,7 @@ def _handle_result(
     if node == "curate" and route == RouteCode.ACCEPT.value:
         stats["committed"] = int(stats.get("committed", 0)) + 1
     elif status == "reject" and (
-        node in {"audit_seed_plan", "curate"} or route.startswith("drop_")
+        node in {"audit_design", "curate"} or route.startswith("drop_")
     ):
         stats["dropped"] = int(stats.get("dropped", 0)) + 1
 
@@ -496,7 +499,7 @@ def _handle_result(
 
 def _progress_line(stage: str, event: str, data: dict[str, Any]) -> str:
     bits = [event, stage]
-    for key in ("round", "seed", "id", "candidate", "attempt", "remaining", "retry"):
+    for key in ("round", "design", "id", "candidate", "attempt", "remaining", "retry"):
         value = data.get(key)
         if value is not None:
             bits.append(f"{key}={_short_id(str(_enum_value(value)))}")

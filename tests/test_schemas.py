@@ -1,23 +1,29 @@
 from __future__ import annotations
 
-from models import CandidateSample, SeedSpec, TaxonomyCell
+from models import CandidateSample, DesignBrief, TaxonomyCell
 
 
 def test_candidate_round_trip() -> None:
     cell = TaxonomyCell(case_type="proxy_strong", difficulty=2, scenario="nominal")
-    seed = SeedSpec.create(
-        seed_id="seed-1",
+    design = DesignBrief.create(
+        design_id="design-1",
         cell=cell,
-        intent="Generate a constrained haiku benchmark case.",
-        ability="constrained_poetic_generation",
-        environment="single_turn_creative_writing",
-        diagnostic_pressure="forbid obvious imagery while preserving intent",
-        scoring_strategy="hard_checks_plus_rubric",
-        leakage_risk="format-only haiku template",
+        target_ability="constrained_poetic_generation",
+        target_environment="single_turn_creative_writing",
+        design_intent="Generate a constrained haiku benchmark case.",
+        environment_premise={"mode": "single turn", "tools": "none"},
+        failure_mode_family="template compliance without poetic transfer",
+        diagnostic_pressure=["forbid obvious imagery while preserving intent"],
+        why_weak_agents_fail=["they satisfy line count while using obvious imagery"],
+        tempting_shallow_solutions=["generic autumn haiku template"],
+        success_evidence_required=["indirect emotional transfer", "lexical constraint adherence"],
+        minimum_depth_requirements=["must balance form, constraint, and metaphor"],
+        forbidden_shortcuts=["format-only haiku"],
+        non_goals=["broad poetry taste"],
     )
     candidate = CandidateSample(
         id="candidate-1",
-        seed_id=seed.id,
+        design_id=design.id,
         content_hash="abc",
         cell=cell,
         benchmark_case={"prompt": "Write a haiku about autumn restraint without mentioning leaves."},
@@ -37,5 +43,5 @@ def test_candidate_round_trip() -> None:
 
     loaded = CandidateSample.model_validate(candidate.model_dump())
 
-    assert loaded.seed_id == "seed-1"
+    assert loaded.design_id == "design-1"
     assert loaded.cell.key() == "proxy_strong|2|nominal"

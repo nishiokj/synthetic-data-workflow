@@ -13,10 +13,10 @@ from models import (
     AdversaryReport,
     CandidateSample,
     EvidenceRef,
-    PlanVerdict,
+    DesignVerdict,
     RouteCode,
     SampleVerdict,
-    SeedSpec,
+    DesignBrief,
     TaxonomyCell,
     Verdict,
     stable_hash,
@@ -145,14 +145,14 @@ class OpenAIClient:
             raise ProviderError(f"OpenAI read timed out after {self.config.request_timeout_seconds:g}s") from exc
 
 
-class Strategist:
-    role_name = "Strategist"
+class Designer:
+    role_name = "Designer"
 
     def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
 
-    def plan(
+    def design(
         self,
         *,
         run_id: str,
@@ -160,13 +160,15 @@ class Strategist:
         coverage_snapshot: dict[str, int],
         retry_route_code: RouteCode | None = None,
         retry_subcodes: list[str] | None = None,
-    ) -> tuple[list[SeedSpec], dict[str, Any]]:
+    ) -> tuple[list[DesignBrief], dict[str, Any]]:
         system = (
-            "You are the Strategist for a benchmark-generation pipeline. Produce diverse benchmark seed specs only. "
-            "Do not generate benchmark cases. Return JSON only."
+            "You are the Designer for a benchmark-generation pipeline. Produce diagnostic design briefs only. "
+            "You separate benchmark design from implementation: define what the case must reveal, but do not write final prompts, code files, tests, dependencies, rubrics, or answer keys. "
+            "Return JSON only. A design brief is not a topic label; it must define the target ability, environment premise, failure family, diagnostic pressure, shallow paths, and evidence required for success. "
+            "Reject your own idea before returning it if it naturally becomes a one-line patch, obvious flag/default flip, comparator swap, off-by-one arithmetic repair, cache bypass, synchronous-vs-async toggle, test edit, sleep/timing hack, or direct traceback fix."
         )
         payload: dict[str, Any] = {
-            "task": "Create seed specs for benchmark cases where score_x should proxy ability_z in environment_y.",
+            "task": "Create diagnostic design briefs for benchmark cases where score_x should proxy ability_z in environment_y.",
             "target_count": target_n,
             "case_types": self.domain.case_types,
             "difficulties": self.domain.difficulties,
@@ -176,15 +178,32 @@ class Strategist:
             "diagnostic_pressure_types": self.domain.diagnostic_pressure_types,
             "scoring_methods": self.domain.scoring_methods,
             "coverage_snapshot": coverage_snapshot,
+            "design_quality_bar": {
+                "must_have": [
+                    "a concrete product/environment with state, lifecycle, and invariant-bearing objects",
+                    "at least two interacting causes or constraints that make the shallow fix insufficient",
+                    "a tempting wrong fix that is plausible and would pass weak visible checks but fail a stronger invariant",
+                    "a causal region described as a subsystem or interaction, not the exact line/expression/default to flip",
+                    "a design rationale for how the eventual benchmark can produce positive evidence of the target ability beyond table-stakes test passing",
+                ],
+                "must_not_have": [
+                    "off-by-one pagination/binning/slicing as the central repair",
+                    "single-line local arithmetic, comparator, typo, missing import, flag/default, or sync/async toggle as the central repair",
+                    "an environment design that reveals the exact repair or names the faulty expression",
+                    "difficulty that comes from extra files around an obvious local fix",
+                    "a scoring idea that mostly means 'run the one visible test and read the explanation'",
+                ],
+            },
             "required_json_shape": {
-                "seeds": [
+                "designs": [
                     {
                         "case_type": "one allowed case type",
                         "difficulty": "integer 1..5",
                         "scenario": "one allowed scenario",
-                        "ability": "one allowed ability or specific sub-ability",
-                        "environment": "one allowed environment or environment slice",
-                        "environment_seed": {
+                        "target_ability": "one allowed ability or specific sub-ability",
+                        "target_environment": "one allowed environment or environment slice",
+                        "design_intent": "specific generation brief, 12-40 words",
+                        "environment_premise": {
                             "product_context": "specific realistic software setting",
                             "codebase_shape": "compact description of modules/files/components",
                             "state_model": "objects, data flow, lifecycle, or invariant-bearing state",
@@ -193,63 +212,71 @@ class Strategist:
                             "tempting_wrong_fix": "plausible shallow repair path",
                             "actual_causal_region": "where the real cause should live",
                             "required_depth": "why resolving it requires nontrivial reasoning",
-                            "non_goals": ["toy bug shapes to avoid"],
                         },
-                        "diagnostic_pressure": "specific pressure this case should apply",
-                        "scoring_strategy": "how score_x should be determined",
-                        "leakage_risk": "most likely way the benchmark could be passed without the target ability",
-                        "intent": "specific generation brief, 12-40 words",
+                        "failure_mode_family": "class of failure the benchmark should instantiate",
+                        "diagnostic_pressure": ["specific pressures this case should apply"],
+                        "why_weak_agents_fail": ["why weaker evaluated agents should fail"],
+                        "tempting_shallow_solutions": ["plausible cheap approaches that should not score well"],
+                        "success_evidence_required": ["observable evidence a good implementation must elicit"],
+                        "minimum_depth_requirements": ["minimum causal/state/tradeoff depth the implementation must preserve"],
+                        "forbidden_shortcuts": ["benchmark shapes the generator must not collapse into"],
+                        "non_goals": ["things this case is not trying to test"],
                     }
                 ]
             },
         }
         if retry_route_code is not None:
-            payload["prior_plan_rejection"] = {
+            payload["prior_design_rejection"] = {
                 "route_code": retry_route_code.value,
                 "subcodes": retry_subcodes or [],
             }
         user = json.dumps(payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.7)
-        seeds: list[SeedSpec] = []
-        for index, raw in enumerate(payload.get("seeds", [])):
+        designs: list[DesignBrief] = []
+        for index, raw in enumerate(payload.get("designs", [])):
             cell = TaxonomyCell(
                 case_type=raw["case_type"],
                 difficulty=int(raw["difficulty"]),
                 scenario=raw["scenario"],
             )
-            seeds.append(
-                SeedSpec.create(
-                    seed_id=f"{run_id}-seed-{index + 1}",
+            designs.append(
+                DesignBrief.create(
+                    design_id=f"{run_id}-design-{index + 1}",
                     cell=cell,
-                    intent=raw["intent"],
-                    ability=str(raw["ability"]),
-                    environment=str(raw["environment"]),
-                    environment_seed=raw["environment_seed"] if isinstance(raw.get("environment_seed"), dict) else {},
-                    diagnostic_pressure=str(raw["diagnostic_pressure"]),
-                    scoring_strategy=str(raw["scoring_strategy"]),
-                    leakage_risk=str(raw["leakage_risk"]),
-                    parent_plan_id=f"{run_id}-plan-1",
+                    target_ability=str(raw["target_ability"]),
+                    target_environment=str(raw["target_environment"]),
+                    design_intent=str(raw["design_intent"]),
+                    environment_premise=raw["environment_premise"] if isinstance(raw.get("environment_premise"), dict) else {},
+                    failure_mode_family=str(raw["failure_mode_family"]),
+                    diagnostic_pressure=_string_list(raw.get("diagnostic_pressure", [])),
+                    why_weak_agents_fail=_string_list(raw.get("why_weak_agents_fail", [])),
+                    tempting_shallow_solutions=_string_list(raw.get("tempting_shallow_solutions", [])),
+                    success_evidence_required=_string_list(raw.get("success_evidence_required", [])),
+                    minimum_depth_requirements=_string_list(raw.get("minimum_depth_requirements", [])),
+                    forbidden_shortcuts=_string_list(raw.get("forbidden_shortcuts", [])),
+                    non_goals=_string_list(raw.get("non_goals", [])),
+                    parent_design_batch_id=f"{run_id}-design-batch-1",
                 )
             )
-        return seeds, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
+        return designs, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
 
 
-class PlanAuditor:
-    role_name = "PlanAuditor"
+class DesignAuditor:
+    role_name = "DesignAuditor"
 
     def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
 
-    def audit(self, seed: SeedSpec) -> tuple[PlanVerdict, dict[str, Any]]:
+    def audit(self, design: DesignBrief) -> tuple[DesignVerdict, dict[str, Any]]:
         system = (
-            "You are a stateless Plan Auditor. Judge the seed against the domain criteria. "
+            "You are a stateless Design Auditor. Judge the design against the domain criteria. "
             "Return verdict metadata plus a concise public rationale. "
-            "Do not reveal hidden chain-of-thought. Do not rewrite, improve, or repair the seed. Return JSON only."
+            "Do not reveal hidden chain-of-thought. Do not rewrite, improve, or repair the design. Return JSON only."
         )
         user = json.dumps(
             {
-                "seed": seed.model_dump(mode="json"),
+                "design": design.model_dump(mode="json"),
                 "criteria": {
                     "allowed_case_types": self.domain.case_types,
                     "allowed_scenarios": self.domain.scenarios,
@@ -258,9 +285,9 @@ class PlanAuditor:
                     "diagnostic_pressure_types": self.domain.diagnostic_pressure_types,
                     "scoring_methods": self.domain.scoring_methods,
                     "difficulty_range": self.domain.difficulties,
-                    "code_seed_standard": {
+                    "code_design_standard": {
                         "required_when_domain": "benchmark_code_debug",
-                        "environment_seed_must_define": [
+                        "environment_premise_must_define": [
                             "product_context",
                             "codebase_shape",
                             "state_model",
@@ -272,10 +299,12 @@ class PlanAuditor:
                             "non_goals",
                         ],
                         "reject_if": [
-                            "the seed can naturally instantiate as a one-line patch",
+                            "the design can naturally instantiate as a one-line patch",
                             "the environment is just a file/function label",
                             "the tempting wrong fix is not plausible",
                             "the failure has no state, invariant, or causal depth",
+                            "the actual_causal_region names the exact expression, flag, comparator, default, or one-line repair",
+                            "the natural solution is to make an async path synchronous, bypass a cache, edit a test, add a sleep, or change one arithmetic boundary",
                         ],
                     },
                     "route_codes": self.domain.route_codes,
@@ -295,8 +324,8 @@ class PlanAuditor:
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.2)
         verdict = _verdict(payload.get("verdict"))
         route_code = _route_code(payload.get("route_code"), default=RouteCode.ACCEPT if verdict == Verdict.ACCEPT else RouteCode.REJECT_CRITERIA_MISMATCH)
-        plan_verdict = PlanVerdict(
-            seed_id=seed.id,
+        design_verdict = DesignVerdict(
+            design_id=design.id,
             verdict=verdict,
             route_code=route_code,
             subcodes=list(payload.get("subcodes", [])),
@@ -304,7 +333,7 @@ class PlanAuditor:
             evidence=_evidence(payload.get("evidence", [])),
             rationale=str(payload.get("rationale", "")),
         )
-        return plan_verdict, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
+        return design_verdict, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
 
 
 _GENERATOR_PRINCIPLES = """
@@ -332,12 +361,20 @@ outputs. Do not create complexity by adding noise, verbosity, irrelevant files,
 or confusing wording. Create complexity through causal depth, tradeoffs,
 coverage breadth, and non-obvious failure modes.
 
-Avoid safe benchmark templates unless the seed explicitly requires one. In code
+Avoid safe benchmark templates unless the design explicitly requires one. In code
 debugging, do not default to trivial off-by-one, typo, missing import, wrong
 operator, or single visible failing assertion cases. If you use a familiar bug
 shape, add a substantive twist: an upstream producer/consumer mismatch, an
 invariant that only fails under an edge case, a misleading product constraint,
 or an explanation burden that reveals real causal reasoning.
+
+Do not create a benchmark whose central exploit can be described as "change this
+one line/default/flag/operator and the visible test passes." Do not rely on
+instructions that forbid the cheap patch. Build benchmark substance: a richer
+causal situation, meaningful invariants, and observable evidence that separates
+causal understanding from local patching. Warnings are not pressure. Negative
+controls are not pressure unless they reflect real failure modes a judge can
+observe.
 
 Never leak the answer in candidate-facing material. If the benchmark asks an
 agent to infer, diagnose, judge, repair, or discover something, the prompt,
@@ -347,7 +384,7 @@ its own answer cannot be promoted no matter how strong the rubric looks.
 
 Prefer benchmark designs that create pressure toward excellent outputs, not only
 filters against bad outputs. The case should make a strong model reveal taste,
-judgment, control, strategy, or depth that an adequate model would not show.
+judgment, control, design, or depth that an adequate model would not show.
 Avoid converging on familiar safe templates. If the first design is a standard
 constraint-following prompt, improve it before returning it by adding meaningful
 tradeoff, transformation, preservation, comparison, revision, or other structure
@@ -425,6 +462,14 @@ def _section(parts: list[str], title: str, body: Any) -> None:
         parts.append(f"\n{title}:\n{str(body).strip()}")
 
 
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if value is None:
+        return []
+    return [str(value)]
+
+
 class SampleGenerator:
     role_name = "SampleGenerator"
 
@@ -437,14 +482,20 @@ class SampleGenerator:
         self,
         *,
         run_id: str,
-        seed: SeedSpec,
+        design: DesignBrief,
         attempt: int,
         retry_route_code: RouteCode | None = None,
         retry_subcodes: list[str] | None = None,
     ) -> tuple[CandidateSample, dict[str, Any]]:
-        system = self._system
+        system = (
+            self._system
+            + "\n\nDESIGN IMPLEMENTATION CONTRACT\n"
+            "You are implementing a diagnostic design brief. The design brief decides the target ability, target environment, failure family, diagnostic pressure, shallow paths, and minimum depth. "
+            "You may choose concrete artifact details, but you may not lower the ambition, simplify the causal structure, replace the failure family, or turn the brief into a smaller benchmark. "
+            "If implementation choices are needed, choose the strongest faithful artifact that preserves the design's evidence requirements."
+        )
         payload: dict[str, Any] = {
-            "seed": seed.model_dump(mode="json"),
+            "design_brief": design.model_dump(mode="json"),
             "domain": {
                 "output_schema": self.domain.output_schema,
                 "benchmark_case_schema": self.domain.benchmark_case_schema,
@@ -491,8 +542,8 @@ class SampleGenerator:
         user = json.dumps(payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.8)
         content = {
-            "seed_id": seed.id,
-            "cell": seed.cell.model_dump(),
+            "design_id": design.id,
+            "cell": design.cell.model_dump(),
             "output": payload,
             "benchmark_case": payload.get("benchmark_case", {}),
             "score_x": payload.get("score_x", {}),
@@ -507,10 +558,10 @@ class SampleGenerator:
             "negative_controls": list(payload.get("negative_controls", [])),
         }
         candidate = CandidateSample(
-            id=f"{run_id}-candidate-{seed.id}-{attempt}",
-            seed_id=seed.id,
+            id=f"{run_id}-candidate-{design.id}-{attempt}",
+            design_id=design.id,
             content_hash=stable_hash(content),
-            cell=seed.cell,
+            cell=design.cell,
             output=dict(payload),
             benchmark_case=dict(payload.get("benchmark_case", {})),
             score_x=dict(payload.get("score_x", {})),
@@ -523,9 +574,9 @@ class SampleGenerator:
             known_limits=list(payload.get("known_limits", [])),
             coverage_tags=list(payload.get("coverage_tags", [])),
             negative_controls=list(payload.get("negative_controls", [])),
-            difficulty=seed.cell.difficulty,
-            case_type=seed.cell.case_type,
-            provenance={"seed_id": seed.id, "generator": self.role_name},
+            difficulty=design.cell.difficulty,
+            case_type=design.cell.case_type,
+            provenance={"design_id": design.id, "generator": self.role_name},
         )
         return candidate, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
 
@@ -533,7 +584,7 @@ class SampleGenerator:
         self,
         *,
         run_id: str,
-        seed: SeedSpec,
+        design: DesignBrief,
         candidate: CandidateSample,
         report: AdversaryReport,
         attempt: int,
@@ -542,13 +593,15 @@ class SampleGenerator:
             self._system
             + "\n\nREVISION MODE\n"
             "You are revising your own benchmark candidate after a hostile adversary attacked it. "
-            "The adversary is not helping you and is not responsible for improvements. Treat its report as an attack surface map. "
-            "Revise the benchmark so the listed cheap-pass strategies, leakage paths, scoring exploits, and proxy failures no longer work. "
-            "Preserve the seed's intended ability and environment. Return a complete replacement JSON object matching the required schema. "
+            "The adversary is not helping you and is not responsible for improvements. Treat its report as falsification evidence about why the prior candidate was a weak proxy. "
+            "Your goal is not to minimally survive the attack report. Your goal is to produce a stronger benchmark candidate whose actual artifact gives better evidence of the target ability. "
+            "Address the underlying failure classes exposed by the attack report: leakage, toy local fixes, fake difficulty, scoring ambiguity, and shallow pass paths. "
+            "Do not merely add prose warnings, disallowed-solution text, or a negative control naming the exploit. If the prior artifact's core repair is inherently toy-shaped, replace the artifact with a stronger instantiation of the same design rather than decorating the old one. "
+            "Preserve the design's intended ability and environment. Return a complete replacement JSON object matching the required schema. "
             "Do not include meta-discussion about the adversary or the revision process in candidate-facing materials. Return JSON only."
         )
         user_payload = {
-            "seed": seed.model_dump(mode="json"),
+            "design_brief": design.model_dump(mode="json"),
             "prior_candidate": candidate.model_dump(mode="json"),
             "adversary_attack_report": report.model_dump(mode="json"),
             "domain": {
@@ -564,8 +617,8 @@ class SampleGenerator:
         user = json.dumps(user_payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.6)
         content = {
-            "seed_id": seed.id,
-            "cell": seed.cell.model_dump(),
+            "design_id": design.id,
+            "cell": design.cell.model_dump(),
             "output": payload,
             "benchmark_case": payload.get("benchmark_case", {}),
             "score_x": payload.get("score_x", {}),
@@ -582,10 +635,10 @@ class SampleGenerator:
             "adversary_report": report.model_dump(mode="json"),
         }
         revised = CandidateSample(
-            id=f"{run_id}-candidate-{seed.id}-{attempt}-rev",
-            seed_id=seed.id,
+            id=f"{run_id}-candidate-{design.id}-{attempt}-rev",
+            design_id=design.id,
             content_hash=stable_hash(content),
-            cell=seed.cell,
+            cell=design.cell,
             output=dict(payload),
             benchmark_case=dict(payload.get("benchmark_case", {})),
             score_x=dict(payload.get("score_x", {})),
@@ -598,9 +651,9 @@ class SampleGenerator:
             known_limits=list(payload.get("known_limits", [])),
             coverage_tags=list(payload.get("coverage_tags", [])),
             negative_controls=list(payload.get("negative_controls", [])),
-            difficulty=seed.cell.difficulty,
-            case_type=seed.cell.case_type,
-            provenance={"seed_id": seed.id, "generator": self.role_name, "revision_of": candidate.id},
+            difficulty=design.cell.difficulty,
+            case_type=design.cell.case_type,
+            provenance={"design_id": design.id, "generator": self.role_name, "revision_of": candidate.id},
         )
         return revised, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
 
@@ -609,9 +662,13 @@ class Adversary:
     role_name = "Adversary"
     system_prompt = (
         "You are the Adversary for a benchmark-generation pipeline. "
-        "You are not a gate, not a reviewer, and not an improver. Your only job is to attack the benchmark candidate. "
+        "You are not a gate, not a reviewer, not a design compliance checker, and not an improver. Your only job is to attack the benchmark candidate as an independent third party. "
+        "The design brief is a claim to attack, not an authority to obey. You may reject the design premise, the implementation, the scoring setup, the proxy claim, or all of them. "
         "Find how the benchmark can be passed cheaply, gamed, leaked, misread, overclaimed, or made meaningless. "
         "Do not rewrite the benchmark and do not offer helpful edits. You may state survival requirements: conditions that would have to become true for your attack to fail. "
+        "Be explicit and concrete: name the exact one-line patch, file edit, test edit, flag/default flip, cache bypass, synchronous toggle, sleep/logging hack, or grading loophole a weak solver would use. "
+        "If a cheap pass exists, call it out even when the benchmark text says it is forbidden; prose constraints do not stop adversarial solvers. "
+        "Decide whether the candidate should pass onward, receive one revision attempt, or be nuked. Choose pass only when you find no blocking attack that would materially damage the proxy claim. Choose revise when the artifact has a substantive core worth preserving but has concrete fixable weaknesses. Choose nuke when the core task is inherently toy-shaped, leaked, fake-hard, or reducible to local patching such that revision would mostly decorate a bad premise. "
         "Attack candidate-facing prompt, files, comments, tests, fixture names, visible outputs, scoring criteria, negative controls, proxy claims, and known limits. "
         "Prioritize answer leakage, trivial core repairs, fake difficulty, vague scoring, missing operational checks, overbroad proxy claims, and shallow pass strategies. "
         "Return JSON only. Do not reveal hidden chain-of-thought."
@@ -621,8 +678,9 @@ class Adversary:
         self.client = client
         self.domain = domain
 
-    def attack(self, candidate: CandidateSample) -> tuple[AdversaryReport, dict[str, Any]]:
+    def attack(self, candidate: CandidateSample, design: DesignBrief | None = None) -> tuple[AdversaryReport, dict[str, Any]]:
         payload = {
+            "design_brief": design.model_dump(mode="json") if design is not None else None,
             "candidate": candidate.model_dump(mode="json"),
             "attack_surface": {
                 "domain_id": self.domain.domain_id,
@@ -631,9 +689,12 @@ class Adversary:
                 "common_rejection_patterns": self.domain.generator_guidance.get("common_rejection_patterns", []),
             },
             "required_json_shape": {
+                "revision_disposition": "pass, revise, or nuke",
+                "disposition_rationale": "why this candidate can proceed, deserves revision, or should be discarded instead",
                 "attack_summary": "short hostile summary of how this benchmark can be defeated",
                 "attacks": [
                     {
+                        "attack_target": "design_premise | implementation | scoring | proxy_claim | leakage | other",
                         "attack_type": "answer_leakage | cheap_pass | scoring_ambiguity | fake_difficulty | proxy_overclaim | other",
                         "exploit_path": "how a weak evaluated agent or bad grader can exploit the benchmark",
                         "evidence": "specific candidate-facing field/path/span",
@@ -648,8 +709,13 @@ class Adversary:
         }
         user = json.dumps(payload, sort_keys=True)
         raw, meta = self.client.complete_json(system=self.system_prompt, user=user, temperature=0.2)
+        disposition = str(raw.get("revision_disposition", "revise")).lower()
+        if disposition not in {"pass", "revise", "nuke"}:
+            disposition = "revise"
         report = AdversaryReport(
             candidate_id=candidate.id,
+            revision_disposition=disposition,
+            disposition_rationale=str(raw.get("disposition_rationale", "")),
             attack_summary=str(raw.get("attack_summary", "")),
             attacks=list(raw.get("attacks", [])),
             cheap_pass_strategy=str(raw.get("cheap_pass_strategy", "")),

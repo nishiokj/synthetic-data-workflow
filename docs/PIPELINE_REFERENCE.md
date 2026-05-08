@@ -11,18 +11,18 @@ A single-page guide to runtime nodes, route codes, context policies, and retry b
                          ║         PLANNING  BATCH          ║
                          ║                                  ║
               ┌──────────╢  ┌─────────────────────────────┐ ║
-              │          ║  │  strategy                   │ ║
-              │          ║  │  Strategist · LLM           │ ║
+              │          ║  │  design                   │ ║
+              │          ║  │  Designer · LLM           │ ║
               │          ║  └──────────────┬──────────────┘ ║
-              │          ║                 │ seed batch      ║
+              │          ║                 │ design batch      ║
               │          ║  ┌──────────────▼──────────────┐ ║
-              │          ║  │  validate_seed_plan_det     │ ║
-              │          ║  │  Batch plan check · Det     │ ║
+              │          ║  │  validate_design_batch_det     │ ║
+              │          ║  │  Batch design check · Det     │ ║
               │          ║  └──────────────┬──────────────┘ ║
               │          ╚═════════════════╪════════════════╝
               │                           │
               │   ┌── reject_coverage_mismatch
-              │   │   reject_duplicate ◄──┘  (retry < max_plan_retries)
+              │   │   reject_duplicate ◄──┘  (retry < max_design_retries)
               │   │
               └───┘   drop_retry_exhausted ──────────────────────► END
                                 │
@@ -32,15 +32,15 @@ A single-page guide to runtime nodes, route codes, context policies, and retry b
                       ║            PER-SEED  EXECUTION             ║
                       ║                                            ║
                       ║   ┌────────────────────────────────────┐   ║
-                      ║   │  select_next_seed                  │   ║
+                      ║   │  select_next_design                  │   ║
                       ║   │  Queue cursor · Det                │◄──╫──────────────────┐
                       ║   └──────────────────┬─────────────────┘   ║                  │
-                      ║          seed        │         queue        ║                  │
-                      ║       available      │         empty    ────╫──► strategy      │
+                      ║          design        │         queue        ║                  │
+                      ║       available      │         empty    ────╫──► design      │
                       ║                      ▼                      ║                  │
                       ║   ┌────────────────────────────────────┐   ║                  │
-                      ║   │  audit_seed_plan                   │   ║                  │
-                      ║   │  PlanAuditor · LLM                 │   ║                  │
+                      ║   │  audit_design                   │   ║                  │
+                      ║   │  DesignAuditor · LLM                 │   ║                  │
                       ║   └──────────────────┬─────────────────┘   ║                  │
                       ║     reject_* ────────┼──► drop archive     ║                  │
                       ║                      │ accept               ║                  │
@@ -84,10 +84,10 @@ A single-page guide to runtime nodes, route codes, context policies, and retry b
                                    │  COMMITTED SAMPLE │                                │
                                    │  data/corpus/     │                                │
                                    └────────┬─────────┘                                │
-                            target_n        │       more seeds      queue empty /       │
+                            target_n        │       more designs      queue empty /       │
                             reached         │       queued          target not met      │
                                ▼            │           └──────────────────────────────┘
-                              END           └──────────► select_next_seed
+                              END           └──────────► select_next_design
 ```
 
 Every stage writes one `StageRecord` to `logs/<run_id>/stage_records.jsonl`.
@@ -99,10 +99,10 @@ Every stage writes one `StageRecord` to `logs/<run_id>/stage_records.jsonl`.
 ```
   Node                        fn name                    Role              Det/LLM
   ──────────────────────────────────────────────────────────────────────────────────
-  Strategy                    strategy                   Strategist        LLM
-  Batch plan check            validate_seed_plan_det     —                 Det
-  Select next seed            select_next_seed           —                 Det (queue)
-  Seed plan audit             audit_seed_plan            PlanAuditor       LLM
+  Design                    design                   Designer        LLM
+  Batch design check            validate_design_batch_det     —                 Det
+  Select next design            select_next_design           —                 Det (queue)
+  Design audit             audit_design            DesignAuditor       LLM
   Generate sample             generate                   SampleGenerator   LLM
   Deterministic validation    validate_det               —                 Det
   Semantic validation         validate_semantic          SemanticValidator LLM
@@ -125,8 +125,8 @@ Every stage writes one `StageRecord` to `logs/<run_id>/stage_records.jsonl`.
   reject_criteria_mismatch    Failed a stated evaluation criterion       semantic validator
   reject_schema               Artifact violates JSON/Pydantic schema     det validator
   reject_leakage              Label/answer appears verbatim in inputs    det validator
-  reject_duplicate            Embedding distance below novelty τ         batch plan check · curator
-  reject_coverage_mismatch    Taxonomy cell saturated or mismatched      batch plan check · det validator
+  reject_duplicate            Embedding distance below novelty τ         batch design check · curator
+  reject_coverage_mismatch    Taxonomy cell saturated or mismatched      batch design check · det validator
   reject_semantic_mismatch    Semantic rule violated (LLM judgment)      semantic validator
   reject_upstream_invariant   Should have failed an earlier stage        any  (watchlist only, POC 1)
 ```
@@ -168,54 +168,54 @@ Every stage writes one `StageRecord` to `logs/<run_id>/stage_records.jsonl`.
 ### Planning batch
 
 ```
-  strategy
-    ├─ (batch emitted) ──────────────────────────────► validate_seed_plan_det
+  design
+    ├─ (batch emitted) ──────────────────────────────► validate_design_batch_det
     └─ retry_provider_empty (still routed through batch check)
 
-  validate_seed_plan_det
-    ├─ accept ───────────────────────────────────────► select_next_seed
+  validate_design_batch_det
+    ├─ accept ───────────────────────────────────────► select_next_design
     ├─ reject_coverage_mismatch  }
-    │  reject_duplicate          }  retry < max_plan_retries  ──► strategy  [FRESH]
+    │  reject_duplicate          }  retry < max_design_retries  ──► design  [FRESH]
     └─ drop_retry_exhausted ─────────────────────────► END  (drop batch)
 ```
 
-### Seed loop
+### Design loop
 
 ```
-  select_next_seed
-    ├─ seed available ───────────────────────────────► audit_seed_plan
-    └─ queue empty · target not met ────────────────► strategy
+  select_next_design
+    ├─ design available ───────────────────────────────► audit_design
+    └─ queue empty · target not met ────────────────► design
 
-  audit_seed_plan
+  audit_design
     ├─ accept ───────────────────────────────────────► generate
-    └─ reject_* ─────── archive ─────────────────────► select_next_seed  (or strategy)
+    └─ reject_* ─────── archive ─────────────────────► select_next_design  (or design)
 
   generate
     ├─ accept ───────────────────────────────────────► validate_det
     ├─ retry_infra / retry_parse / retry_provider_empty
     │    retry < max_generation_retries  ────────────► generate  [SAME_INPUT_RETRY]
-    └─ drop_retry_exhausted ─────── archive ─────────► select_next_seed
+    └─ drop_retry_exhausted ─────── archive ─────────► select_next_design
 
   validate_det
     ├─ accept ───────────────────────────────────────► validate_semantic
     ├─ reject_schema / reject_leakage / reject_coverage_mismatch
     │    retry < max_generation_retries  ────────────► generate  [FRESH]
-    └─ drop_retry_exhausted ─────── archive ─────────► select_next_seed
+    └─ drop_retry_exhausted ─────── archive ─────────► select_next_design
 
   validate_semantic
     ├─ accept ───────────────────────────────────────► curate
     ├─ reject_criteria_mismatch / reject_semantic_mismatch
     │    retry < max_generation_retries  ────────────► generate  [FRESH]
-    └─ drop_retry_exhausted ─────── archive ─────────► select_next_seed
+    └─ drop_retry_exhausted ─────── archive ─────────► select_next_design
 
   curate
     ├─ accept ───────────────────────────────────────► commit
-    └─ reject_duplicate ──── archive ────────────────► select_next_seed  (no retry useful)
+    └─ reject_duplicate ──── archive ────────────────► select_next_design  (no retry useful)
 
   commit
     ├─ target_n reached ─────────────────────────────► END
-    ├─ more seeds queued ────────────────────────────► select_next_seed
-    └─ queue empty · target not met ────────────────► strategy
+    ├─ more designs queued ────────────────────────────► select_next_design
+    └─ queue empty · target not met ────────────────► design
 ```
 
 ---
@@ -225,9 +225,9 @@ Every stage writes one `StageRecord` to `logs/<run_id>/stage_records.jsonl`.
 ```
   Boundary                                 Failure type       Limit              On exhaustion
   ──────────────────────────────────────────────────────────────────────────────────────────────
-  strategy → validate_seed_plan_det        Content/coverage   max_plan_retries   Drop batch → END
-  generate  (infra/parse)                  Infra · parse      max_gen_retries    Drop seed
-  generate  (content from det/sem)         Schema · semantic  max_gen_retries    Drop seed
+  design → validate_design_batch_det        Content/coverage   max_design_retries   Drop batch → END
+  generate  (infra/parse)                  Infra · parse      max_gen_retries    Drop design
+  generate  (content from det/sem)         Schema · semantic  max_gen_retries    Drop design
   curate    (novelty)                       Duplicate          No retry           Log gap; discard
 ```
 

@@ -84,8 +84,8 @@ flowchart LR
 
 **Named models:**
 
-- `SeedSpec`
-- `PlanVerdict`
+- `DesignBrief`
+- `DesignVerdict`
 - `CandidateSample`
 - `SampleVerdict`
 - `CertifiedSample`
@@ -226,8 +226,8 @@ flowchart LR
 
 **Agent names:**
 
-- `Strategist`
-- `PlanAuditor`
+- `Designer`
+- `DesignAuditor`
 - `SampleGenerator`
 - `SemanticValidator`
 
@@ -250,8 +250,8 @@ flowchart LR
 
 **Node names:**
 
-- `plan_strategy_batch`
-- `audit_seed_plan`
+- `design_batch`
+- `audit_design`
 - `generate_candidate_sample`
 - `validate_candidate_deterministically`
 - `validate_candidate_semantically`
@@ -347,7 +347,7 @@ python main.py --domain domains/qa_item.yaml --target-stage validator --target-n
 The demo is valid only if it runs the same code path as the product POC:
 
 ```text
-domain contract -> strategy -> plan audit -> generation -> validation -> curation -> analysis
+domain contract -> design -> design audit -> generation -> validation -> curation -> analysis
 ```
 
 Test fixture mode is allowed for unit tests only. It must be named as a fixture

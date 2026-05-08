@@ -67,7 +67,7 @@ subcodes:
   - unknown_case_type
   - unknown_difficulty
   - unknown_scenario
-  - duplicate_seed
+  - duplicate_design
   - near_duplicate
   - provider_error
 
@@ -89,7 +89,7 @@ reason_codes:
   - near_duplicate
 
 novelty_threshold: 0.08
-max_plan_retries: 2
+max_design_retries: 2
 max_generation_retries: 2
 
 deterministic_rules:
@@ -248,7 +248,7 @@ generator_guidance:
     project context, files, symptoms, constraints, and task prompt. The scenario
     should feel like a real internal tool, service, library, data workflow, or
     product bug rather than a Python kata. Do not settle for a toy unit-test repair
-    when the seed asks for a hard benchmark; make the case compact enough to
+    when the design asks for a hard benchmark; make the case compact enough to
     understand but rich enough that success requires real engineering judgment.
     Focus this generation step on the candidate-facing scenario. Later pipeline
     stages will handle evaluation details. If the schema requires scoring fields,

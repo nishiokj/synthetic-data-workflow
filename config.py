@@ -32,7 +32,7 @@ class DomainConfig(BaseModel):
     subcodes: list[str]
     reason_codes: list[str]
     novelty_threshold: float = 0.08
-    max_plan_retries: int = 2
+    max_design_retries: int = 2
     max_generation_retries: int = 2
     deterministic_rules: dict[str, Any] = Field(default_factory=dict)
     semantic_rules: list[str] = Field(default_factory=list)

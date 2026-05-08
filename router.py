@@ -10,7 +10,7 @@ def route_after(
     verdict: Verdict,
     route_code: RouteCode,
     retry_index: int = 0,
-    max_plan_retries: int = 2,
+    max_design_retries: int = 2,
     max_generation_retries: int = 2,
     subcodes: list[str] | None = None,
     reason_codes: list[str] | None = None,
@@ -25,16 +25,16 @@ def route_after(
     final_route = route_code
     final_verdict = verdict
 
-    if from_stage == StageKind.STRATEGY:
-        next_stage = StageKind.PLAN_AUDIT if verdict == Verdict.ACCEPT else None
+    if from_stage == StageKind.DESIGN:
+        next_stage = StageKind.DESIGN_AUDIT if verdict == Verdict.ACCEPT else None
         terminal = verdict == Verdict.REJECT
 
-    elif from_stage == StageKind.PLAN_AUDIT:
+    elif from_stage == StageKind.DESIGN_AUDIT:
         if verdict == Verdict.ACCEPT:
             next_stage = StageKind.GENERATION
             context_policy = ContextPolicy.CRITERIA_ONLY
-        elif retry_index < max_plan_retries:
-            next_stage = StageKind.STRATEGY
+        elif retry_index < max_design_retries:
+            next_stage = StageKind.DESIGN
             context_policy = ContextPolicy.CRITERIA_PLUS_ROUTE_CODE
         else:
             terminal = True

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from config import load_domain
-from models import CandidateSample, SeedSpec, TaxonomyCell, Verdict
-from rules import deterministic_sample_verdict, validate_seed_plan
+from models import CandidateSample, DesignBrief, TaxonomyCell, Verdict
+from rules import deterministic_sample_verdict, validate_design_batch
 
 
 def _candidate(**overrides) -> CandidateSample:
     cell = TaxonomyCell(case_type="proxy_strong", difficulty=3, scenario="adversarial")
     values = {
         "id": "candidate-1",
-        "seed_id": "seed-1",
+        "design_id": "design-1",
         "content_hash": "abc",
         "cell": cell,
         "benchmark_case": {"prompt": "Write a haiku that evokes layoffs as late autumn without saying work, loss, leaves, cold, or endings."},
@@ -37,15 +37,15 @@ def _candidate(**overrides) -> CandidateSample:
     return CandidateSample(**values)
 
 
-def _code_seed(**overrides) -> SeedSpec:
+def _code_design(**overrides) -> DesignBrief:
     cell = TaxonomyCell(case_type="proxy_strong", difficulty=4, scenario="edge")
     values = {
-        "seed_id": "code-seed-1",
+        "design_id": "code-design-1",
         "cell": cell,
-        "intent": "Create a compact benchmark around a realistic stateful debugging failure.",
-        "ability": "fault_localization",
-        "environment": "single_turn_debug_with_test",
-        "environment_seed": {
+        "target_ability": "fault_localization",
+        "target_environment": "single_turn_debug_with_test",
+        "design_intent": "Create a compact benchmark around a realistic stateful debugging failure.",
+        "environment_premise": {
             "product_context": "billing reconciliation worker for subscription invoices",
             "codebase_shape": "parser, reconciliation engine, export adapter, and focused tests",
             "state_model": "invoice rows move through parsed, matched, adjusted, and exported states",
@@ -54,14 +54,18 @@ def _code_seed(**overrides) -> SeedSpec:
             "tempting_wrong_fix": "round the exported total or patch the summary formatter",
             "actual_causal_region": "refund normalization before grouping by billing period",
             "required_depth": "requires tracing a transformed value across parser, normalizer, and summarizer",
-            "non_goals": ["typo", "missing import", "one-line loop patch"],
         },
-        "diagnostic_pressure": "misleading output error with upstream normalization cause",
-        "scoring_strategy": "hard_checks_plus_rubric",
-        "leakage_risk": "formatter-only patch passes visible symptom without preserving invariant",
+        "failure_mode_family": "misleading downstream aggregate caused by upstream normalization",
+        "diagnostic_pressure": ["misleading output error with upstream normalization cause"],
+        "why_weak_agents_fail": ["they patch the formatter or rounded total without preserving the period invariant"],
+        "tempting_shallow_solutions": ["formatter-only patch passes visible symptom without preserving invariant"],
+        "success_evidence_required": ["trace transformed values across parser, normalizer, and summarizer"],
+        "minimum_depth_requirements": ["requires at least two modules and a state invariant"],
+        "forbidden_shortcuts": ["one-line arithmetic boundary patch", "test edit", "formatter mask"],
+        "non_goals": ["typo", "missing import", "one-line loop patch"],
     }
     values.update(overrides)
-    return SeedSpec.create(**values)
+    return DesignBrief.create(**values)
 
 
 def test_benchmark_candidate_passes_deterministic_rules() -> None:
@@ -145,21 +149,21 @@ def test_code_domain_accepts_candidate_with_oracle() -> None:
     assert checks[-1].check_id == "benchmark_oracle"
 
 
-def test_code_seed_requires_environment_seed_depth() -> None:
+def test_code_design_requires_environment_premise_depth() -> None:
     domain = load_domain("domains/benchmark_code_debug.yaml")
-    seed = _code_seed(environment_seed={})
+    design = _code_design(environment_premise={})
 
-    verdict, route_code, subcodes = validate_seed_plan([seed], domain)
+    verdict, route_code, subcodes = validate_design_batch([design], domain)
 
     assert verdict == Verdict.REJECT
     assert route_code.value == "reject_criteria_mismatch"
     assert subcodes == ["weak_diagnostic_pressure"]
 
 
-def test_code_seed_rejects_toy_core_blueprint() -> None:
+def test_code_design_rejects_toy_core_blueprint() -> None:
     domain = load_domain("domains/benchmark_code_debug.yaml")
-    seed = _code_seed(
-        environment_seed={
+    design = _code_design(
+        environment_premise={
             "product_context": "small list utility",
             "codebase_shape": "one module and one test file",
             "state_model": "single list input and output",
@@ -172,17 +176,17 @@ def test_code_seed_rejects_toy_core_blueprint() -> None:
         }
     )
 
-    verdict, route_code, subcodes = validate_seed_plan([seed], domain)
+    verdict, route_code, subcodes = validate_design_batch([design], domain)
 
     assert verdict == Verdict.REJECT
     assert route_code.value == "reject_criteria_mismatch"
     assert subcodes == ["weak_diagnostic_pressure"]
 
 
-def test_code_seed_accepts_environment_seed_blueprint() -> None:
+def test_code_design_accepts_environment_premise_blueprint() -> None:
     domain = load_domain("domains/benchmark_code_debug.yaml")
 
-    verdict, route_code, subcodes = validate_seed_plan([_code_seed()], domain)
+    verdict, route_code, subcodes = validate_design_batch([_code_design()], domain)
 
     assert verdict == Verdict.ACCEPT
     assert route_code.value == "accept"

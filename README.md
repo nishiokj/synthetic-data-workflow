@@ -29,14 +29,14 @@ The repo is organized around a router-owned stage graph:
 
 ```mermaid
 flowchart LR
-  START((START)) --> Strategy["Strategy<br/>Strategist"]
-  Strategy -->|"seed batch"| PlanCheck["Batch plan check<br/>deterministic"]
-  PlanCheck -->|"accept"| SelectSeed["Select next seed"]
-  PlanCheck -->|"reject / retry"| Strategy
-  SelectSeed -->|"seed available"| SeedAudit["Seed plan audit<br/>PlanAuditor"]
-  SelectSeed -->|"queue empty"| Strategy
-  SeedAudit -->|"accept"| Generate["Generate sample<br/>SampleGenerator"]
-  SeedAudit -->|"reject seed"| Drop["Archive rejection"]
+  START((START)) --> Design["Design<br/>Designer"]
+  Design -->|"design batch"| DesignCheck["Batch design check<br/>deterministic"]
+  DesignCheck -->|"accept"| SelectDesign["Select next design"]
+  DesignCheck -->|"reject / retry"| Design
+  SelectDesign -->|"design available"| DesignAudit["Design audit<br/>DesignAuditor"]
+  SelectDesign -->|"queue empty"| Design
+  DesignAudit -->|"accept"| Generate["Generate sample<br/>SampleGenerator"]
+  DesignAudit -->|"reject design"| Drop["Archive rejection"]
   Generate -->|"accept"| DetVal["Deterministic validation"]
   Generate -->|"retry_*"| Generate
   DetVal -->|"accept"| QualityGate["Quality gate<br/>benchmark proxy"]
@@ -48,9 +48,9 @@ flowchart LR
   Curate -->|"accept"| Commit["Commit sample"]
   Curate -->|"reject_duplicate"| Drop
   Commit -->|"target_n reached"| END((END))
-  Commit -->|"more seeds queued"| SelectSeed
-  Commit -->|"need fresh plan"| Strategy
-  Drop -->|"continue if possible"| SelectSeed
+  Commit -->|"more designs queued"| SelectDesign
+  Commit -->|"need fresh design"| Design
+  Drop -->|"continue if possible"| SelectDesign
 
   classDef startEnd fill:#0f766e,stroke:#0f766e,color:#ffffff,stroke-width:2px;
   classDef llm fill:#eff6ff,stroke:#2563eb,color:#0f172a,stroke-width:2px;
@@ -59,9 +59,9 @@ flowchart LR
   classDef artifact fill:#f8fafc,stroke:#64748b,color:#0f172a,stroke-width:2px;
   classDef reject fill:#fff1f2,stroke:#e11d48,color:#0f172a,stroke-width:2px;
   class START,END startEnd;
-  class Strategy,SeedAudit,Generate,QualityGate,RubricGate llm;
-  class PlanCheck,DetVal,Curate det;
-  class SelectSeed router;
+  class Design,DesignAudit,Generate,QualityGate,RubricGate llm;
+  class DesignCheck,DetVal,Curate det;
+  class SelectDesign router;
   class Commit artifact;
   class Drop reject;
 ```

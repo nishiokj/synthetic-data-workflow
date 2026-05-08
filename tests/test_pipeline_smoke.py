@@ -20,30 +20,36 @@ class FakeOpenAIClient:
             "cost_usd": 0.0,
             "prompt_hash": "fake",
         }
-        if "Strategist" in system:
+        if "Designer" in system:
             return {
-                "seeds": [
+                "designs": [
                     {
                         "case_type": "proxy_strong",
                         "difficulty": 3,
                         "scenario": "adversarial",
-                        "ability": "constrained_poetic_generation",
-                        "environment": "single_turn_creative_writing",
-                        "diagnostic_pressure": "forbid obvious imagery while preserving emotional intent",
-                        "scoring_strategy": "hard_checks_plus_rubric",
-                        "leakage_risk": "format-only haiku template",
-                        "intent": "Generate a haiku benchmark that pressures metaphor and anti-template behavior.",
+                        "target_ability": "constrained_poetic_generation",
+                        "target_environment": "single_turn_creative_writing",
+                        "design_intent": "Generate a haiku benchmark that pressures metaphor and anti-template behavior.",
+                        "environment_premise": {"mode": "single turn", "tools": "none"},
+                        "failure_mode_family": "template compliance without emotional transfer",
+                        "diagnostic_pressure": ["forbid obvious imagery while preserving emotional intent"],
+                        "why_weak_agents_fail": ["they produce a format-valid seasonal template"],
+                        "tempting_shallow_solutions": ["generic haiku about autumn sadness"],
+                        "success_evidence_required": ["indirect metaphor", "constraint adherence"],
+                        "minimum_depth_requirements": ["balance form, lexical avoidance, and emotional intent"],
+                        "forbidden_shortcuts": ["format-only haiku"],
+                        "non_goals": ["broad literary greatness"],
                     }
                 ]
             }, meta
-        if "Plan Auditor" in system:
+        if "Design Auditor" in system:
             return {
                 "verdict": "accept",
                 "route_code": "accept",
                 "subcodes": [],
                 "reason_codes": [],
                 "evidence": [],
-                "rationale": "The seed matches the allowed taxonomy and describes a concrete benchmark pressure.",
+                "rationale": "The design matches the allowed taxonomy and describes a concrete benchmark pressure.",
             }, meta
         if "Benchmark Case Generator" in system:
             return {

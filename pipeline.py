@@ -4,7 +4,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from agents import Adversary, OpenAIClient, PlanAuditor, ProviderError, QualityGate, RubricGate, SampleGenerator, Strategist
+from agents import Adversary, OpenAIClient, DesignAuditor, ProviderError, QualityGate, RubricGate, SampleGenerator, Designer
 from config import RuntimeConfig
 from models import (
     AgentRole,
@@ -13,11 +13,11 @@ from models import (
     CertifiedSample,
     CheckResult,
     ContextPolicy,
-    PlanVerdict,
+    DesignVerdict,
     RouteCode,
     RoutingDecision,
     SampleVerdict,
-    SeedSpec,
+    DesignBrief,
     StageKind,
     StageRecord,
     Verdict,
@@ -25,7 +25,7 @@ from models import (
 )
 from observability import StageLogWriter, emit_event
 from router import route_after
-from rules import deterministic_sample_verdict, validate_seed_plan
+from rules import deterministic_sample_verdict, validate_design_batch
 from services.corpus_index import CorpusIndex
 from services.coverage_ledger import CoverageLedger
 from services.rejection_archive import RejectionArchive
@@ -35,12 +35,12 @@ from services.validation_ledger import ValidationLedger
 class PipelineState(TypedDict, total=False):
     run_id: str
     target_n: int
-    max_plan_retries: int
-    plan_round: int
-    plan_retry_route_code: RouteCode | None
-    plan_retry_subcodes: list[str]
-    seeds_queue: list[SeedSpec]
-    seed: SeedSpec | None
+    max_design_retries: int
+    design_round: int
+    design_retry_route_code: RouteCode | None
+    design_retry_subcodes: list[str]
+    designs_queue: list[DesignBrief]
+    design: DesignBrief | None
     gen_attempt: int
     gen_retry_route_code: RouteCode | None
     gen_retry_subcodes: list[str]
@@ -61,54 +61,54 @@ def route_from_decision(state: PipelineState) -> str:
     if decision is None or decision.terminal:
         return END
     return {
-        StageKind.STRATEGY: "strategy",
-        StageKind.PLAN_AUDIT: "audit_seed_plan",
+        StageKind.DESIGN: "design",
+        StageKind.DESIGN_AUDIT: "audit_design",
         StageKind.GENERATION: "generate",
         StageKind.VALIDATION: "validate_det",
         StageKind.CURATION: "curate",
     }[decision.next_stage]
 
 
-def after_validate_seed_plan_det(state: PipelineState) -> str:
+def after_validate_design_batch_det(state: PipelineState) -> str:
     decision = state["last_decision"]
     if decision and decision.verdict == Verdict.ACCEPT:
-        return "select_next_seed"
+        return "select_next_design"
     return route_from_decision(state)
 
 
 def after_curate(state: PipelineState) -> str:
     if state["committed_count"] >= state["target_n"]:
         return END
-    if state["seeds_queue"]:
-        return "select_next_seed"
-    if state["plan_round"] > state["max_plan_retries"]:
+    if state["designs_queue"]:
+        return "select_next_design"
+    if state["design_round"] > state["max_design_retries"]:
         return END
-    return "strategy"
+    return "design"
 
 
-def after_terminal_seed(state: PipelineState) -> str:
+def after_terminal_design(state: PipelineState) -> str:
     if state["committed_count"] >= state["target_n"]:
         return END
-    if state["seeds_queue"]:
-        return "select_next_seed"
-    if state["plan_round"] > state["max_plan_retries"]:
+    if state["designs_queue"]:
+        return "select_next_design"
+    if state["design_round"] > state["max_design_retries"]:
         return END
-    return "strategy"
+    return "design"
 
 
-def after_select_next_seed(state: PipelineState) -> str:
-    return "audit_seed_plan" if state.get("seed") else "strategy"
+def after_select_next_design(state: PipelineState) -> str:
+    return "audit_design" if state.get("design") else "design"
 
 
-def after_audit_seed_plan(state: PipelineState) -> str:
+def after_audit_design(state: PipelineState) -> str:
     decision = state["last_decision"]
     if decision and decision.verdict == Verdict.ACCEPT:
         return "generate"
-    if state["seeds_queue"]:
-        return "select_next_seed"
-    if state["plan_round"] > state["max_plan_retries"]:
+    if state["designs_queue"]:
+        return "select_next_design"
+    if state["design_round"] > state["max_design_retries"]:
         return END
-    return "strategy"
+    return "design"
 
 
 def after_validate_det(state: PipelineState) -> str | list[str]:
@@ -118,25 +118,32 @@ def after_validate_det(state: PipelineState) -> str | list[str]:
         return ["quality_gate", "rubric_gate"]
     decision = state["last_decision"]
     if decision and decision.terminal:
-        return after_terminal_seed(state)
+        return after_terminal_design(state)
     return route_from_decision(state)
 
 
 def after_generate(state: PipelineState) -> str:
     decision = state["last_decision"]
     if decision and decision.terminal:
-        return after_terminal_seed(state)
+        return after_terminal_design(state)
     return route_from_decision(state)
 
 
-def after_adversary(state: PipelineState) -> str:
+def after_adversary(state: PipelineState) -> str | list[str]:
+    decision = state.get("last_decision")
+    if decision:
+        if decision.terminal:
+            return after_terminal_design(state)
+        return route_from_decision(state)
+    if state.get("adversary_done"):
+        return ["quality_gate", "rubric_gate"]
     return "revise_from_adversary"
 
 
 def after_gate_join(state: PipelineState) -> str:
     decision = state["last_decision"]
     if decision and decision.terminal:
-        return after_terminal_seed(state)
+        return after_terminal_design(state)
     return route_from_decision(state)
 
 
@@ -149,8 +156,8 @@ class PipelineRunner:
         self.validation_ledger = ValidationLedger(self.writer)
         self.rejections = RejectionArchive(self.writer)
         self.corpus = CorpusIndex(config.data_dir, config.domain, self.client, config.run_id)
-        self.strategist = Strategist(self.client, config.domain)
-        self.plan_auditor = PlanAuditor(self.client, config.domain)
+        self.designer = Designer(self.client, config.domain)
+        self.design_auditor = DesignAuditor(self.client, config.domain)
         self.generator = SampleGenerator(self.client, config.domain)
         self.adversary = Adversary(self.client, config.domain)
         self.quality_gate = QualityGate(self.client, config.domain)
@@ -159,10 +166,10 @@ class PipelineRunner:
 
     def _build_graph(self) -> StateGraph:
         graph = StateGraph(PipelineState)
-        graph.add_node("strategy", self.node_strategy)
-        graph.add_node("validate_seed_plan_det", self.node_validate_seed_plan_det)
-        graph.add_node("select_next_seed", self.node_select_next_seed)
-        graph.add_node("audit_seed_plan", self.node_audit_seed_plan)
+        graph.add_node("design", self.node_design)
+        graph.add_node("validate_design_batch_det", self.node_validate_design_batch_det)
+        graph.add_node("select_next_design", self.node_select_next_design)
+        graph.add_node("audit_design", self.node_audit_design)
         graph.add_node("generate", self.node_generate)
         graph.add_node("validate_det", self.node_validate_det)
         graph.add_node("adversary", self.node_adversary)
@@ -171,11 +178,11 @@ class PipelineRunner:
         graph.add_node("rubric_gate", self.node_rubric_gate)
         graph.add_node("join_gates", self.node_join_gates)
         graph.add_node("curate", self.node_curate)
-        graph.add_edge(START, "strategy")
-        graph.add_edge("strategy", "validate_seed_plan_det")
-        graph.add_conditional_edges("validate_seed_plan_det", after_validate_seed_plan_det)
-        graph.add_conditional_edges("select_next_seed", after_select_next_seed)
-        graph.add_conditional_edges("audit_seed_plan", after_audit_seed_plan)
+        graph.add_edge(START, "design")
+        graph.add_edge("design", "validate_design_batch_det")
+        graph.add_conditional_edges("validate_design_batch_det", after_validate_design_batch_det)
+        graph.add_conditional_edges("select_next_design", after_select_next_design)
+        graph.add_conditional_edges("audit_design", after_audit_design)
         graph.add_conditional_edges("generate", after_generate)
         graph.add_conditional_edges("validate_det", after_validate_det)
         graph.add_conditional_edges("adversary", after_adversary)
@@ -197,10 +204,10 @@ class PipelineRunner:
         initial: PipelineState = {
             "run_id": self.config.run_id,
             "target_n": self.config.target_n,
-            "max_plan_retries": self.config.domain.max_plan_retries,
-            "plan_round": 0,
-            "plan_retry_subcodes": [],
-            "seeds_queue": [],
+            "max_design_retries": self.config.domain.max_design_retries,
+            "design_round": 0,
+            "design_retry_subcodes": [],
+            "designs_queue": [],
             "gen_attempt": 0,
             "gen_retry_subcodes": [],
             "det_checks": [],
@@ -216,77 +223,77 @@ class PipelineRunner:
             "dropped": final["dropped_count"],
         }
 
-    def node_strategy(self, state: PipelineState) -> PipelineState:
-        plan_round = state["plan_round"] + 1
+    def node_design(self, state: PipelineState) -> PipelineState:
+        design_round = state["design_round"] + 1
         count = max(1, self.config.target_n * 2)
         self._progress(
-            "strategy",
+            "design",
             "start",
-            round=plan_round,
-            requested_seeds=count,
-            retry=state.get("plan_retry_route_code"),
+            round=design_round,
+            requested_designs=count,
+            retry=state.get("design_retry_route_code"),
         )
-        seeds, meta = self.strategist.plan(
-            run_id=f"{self.config.run_id}-r{plan_round}",
+        designs, meta = self.designer.design(
+            run_id=f"{self.config.run_id}-r{design_round}",
             target_n=count,
             coverage_snapshot=self.coverage.snapshot(),
-            retry_route_code=state.get("plan_retry_route_code"),
-            retry_subcodes=state.get("plan_retry_subcodes"),
+            retry_route_code=state.get("design_retry_route_code"),
+            retry_subcodes=state.get("design_retry_subcodes"),
         )
-        verdict = Verdict.ACCEPT if seeds else Verdict.REJECT
-        route_code = RouteCode.ACCEPT if seeds else RouteCode.RETRY_PROVIDER_EMPTY
+        verdict = Verdict.ACCEPT if designs else Verdict.REJECT
+        route_code = RouteCode.ACCEPT if designs else RouteCode.RETRY_PROVIDER_EMPTY
         self._record(
-            stage_kind=StageKind.STRATEGY,
-            role="plan_strategy_batch",
-            agent_role=AgentRole.STRATEGIST,
-            artifact_id=f"{self.config.run_id}-strategy-{plan_round}",
+            stage_kind=StageKind.DESIGN,
+            role="design_batch",
+            agent_role=AgentRole.DESIGNER,
+            artifact_id=f"{self.config.run_id}-design-{design_round}",
             parent_artifact_id=None,
             verdict=verdict,
             route_code=route_code,
-            context_policy=_producer_context_policy(state.get("plan_retry_route_code")),
+            context_policy=_producer_context_policy(state.get("design_retry_route_code")),
             meta=meta,
-            retry_index=plan_round - 1,
+            retry_index=design_round - 1,
         )
         return {
-            "plan_round": plan_round,
-            "seeds_queue": seeds,
-            "seed": None,
-            "plan_retry_route_code": None,
-            "plan_retry_subcodes": [],
+            "design_round": design_round,
+            "designs_queue": designs,
+            "design": None,
+            "design_retry_route_code": None,
+            "design_retry_subcodes": [],
             "last_decision": None,
         }
 
-    def node_validate_seed_plan_det(self, state: PipelineState) -> PipelineState:
-        seeds = state["seeds_queue"]
-        self._progress("plan_det", "start", round=state["plan_round"], seeds=len(seeds))
-        accepted_seeds, rejected_seeds = self._partition_seed_plan(seeds)
-        if accepted_seeds:
+    def node_validate_design_batch_det(self, state: PipelineState) -> PipelineState:
+        designs = state["designs_queue"]
+        self._progress("design_det", "start", round=state["design_round"], designs=len(designs))
+        accepted_designs, rejected_designs = self._partition_design_batch(designs)
+        if accepted_designs:
             verdict = Verdict.ACCEPT
             route_code = RouteCode.ACCEPT
             subcodes: list[str] = []
-        elif rejected_seeds:
-            _, route_code, subcodes = rejected_seeds[0]
+        elif rejected_designs:
+            _, route_code, subcodes = rejected_designs[0]
             verdict = Verdict.REJECT
         else:
             verdict = Verdict.REJECT
             route_code = RouteCode.RETRY_PROVIDER_EMPTY
             subcodes = ["provider_error"]
-        retry_index = state["plan_round"] - 1
+        retry_index = state["design_round"] - 1
         decision = route_after(
             run_id=self.config.run_id,
-            from_stage=StageKind.PLAN_AUDIT,
+            from_stage=StageKind.DESIGN_AUDIT,
             verdict=verdict,
             route_code=route_code,
             retry_index=retry_index,
-            max_plan_retries=self.config.domain.max_plan_retries,
+            max_design_retries=self.config.domain.max_design_retries,
             subcodes=subcodes,
         )
         self._record(
-            stage_kind=StageKind.PLAN_AUDIT,
-            role="validate_seed_plan_deterministically",
+            stage_kind=StageKind.DESIGN_AUDIT,
+            role="validate_design_batch_deterministically",
             agent_role=None,
-            artifact_id=f"{self.config.run_id}-seed-plan-{state['plan_round']}-deterministic-verdict",
-            parent_artifact_id=f"{self.config.run_id}-strategy-{state['plan_round']}",
+            artifact_id=f"{self.config.run_id}-design-batch-{state['design_round']}-deterministic-verdict",
+            parent_artifact_id=f"{self.config.run_id}-design-{state['design_round']}",
             verdict=verdict,
             route_code=decision.route_code,
             subcodes=subcodes,
@@ -295,11 +302,11 @@ class PipelineRunner:
             meta=_local_meta(),
             retry_index=retry_index,
         )
-        update: PipelineState = {"last_decision": decision, "seeds_queue": accepted_seeds}
-        for rejected_seed, rejected_route_code, rejected_subcodes in rejected_seeds:
+        update: PipelineState = {"last_decision": decision, "designs_queue": accepted_designs}
+        for rejected_design, rejected_route_code, rejected_subcodes in rejected_designs:
             rejected_decision = RoutingDecision(
                 run_id=self.config.run_id,
-                from_stage=StageKind.PLAN_AUDIT,
+                from_stage=StageKind.DESIGN_AUDIT,
                 verdict=Verdict.REJECT,
                 route_code=rejected_route_code,
                 subcodes=rejected_subcodes,
@@ -309,47 +316,47 @@ class PipelineRunner:
                 retry_index=retry_index,
                 terminal=True,
             )
-            self.rejections.append(rejected_seed, rejected_decision)
+            self.rejections.append(rejected_design, rejected_decision)
         if verdict == Verdict.REJECT:
-            update["plan_retry_route_code"] = decision.route_code
-            update["plan_retry_subcodes"] = decision.subcodes
+            update["design_retry_route_code"] = decision.route_code
+            update["design_retry_subcodes"] = decision.subcodes
         return update
 
-    def _partition_seed_plan(
+    def _partition_design_batch(
         self,
-        seeds: list[SeedSpec],
-    ) -> tuple[list[SeedSpec], list[tuple[SeedSpec, RouteCode, list[str]]]]:
-        accepted: list[SeedSpec] = []
-        rejected: list[tuple[SeedSpec, RouteCode, list[str]]] = []
+        designs: list[DesignBrief],
+    ) -> tuple[list[DesignBrief], list[tuple[DesignBrief, RouteCode, list[str]]]]:
+        accepted: list[DesignBrief] = []
+        rejected: list[tuple[DesignBrief, RouteCode, list[str]]] = []
         seen: set[str] = set()
-        for seed in seeds:
-            if seed.content_hash in seen:
-                rejected.append((seed, RouteCode.REJECT_DUPLICATE, ["duplicate_seed"]))
+        for design in designs:
+            if design.content_hash in seen:
+                rejected.append((design, RouteCode.REJECT_DUPLICATE, ["duplicate_design"]))
                 continue
-            verdict, route_code, subcodes = validate_seed_plan([seed], self.config.domain)
+            verdict, route_code, subcodes = validate_design_batch([design], self.config.domain)
             if verdict == Verdict.ACCEPT:
-                accepted.append(seed)
-                seen.add(seed.content_hash)
+                accepted.append(design)
+                seen.add(design.content_hash)
             else:
-                rejected.append((seed, route_code, subcodes))
+                rejected.append((design, route_code, subcodes))
         return accepted, rejected
 
-    def node_select_next_seed(self, state: PipelineState) -> PipelineState:
-        seeds = list(state["seeds_queue"])
-        seed = seeds.pop(0) if seeds else None
-        if seed:
+    def node_select_next_design(self, state: PipelineState) -> PipelineState:
+        designs = list(state["designs_queue"])
+        design = designs.pop(0) if designs else None
+        if design:
             self._progress(
-                "seed",
+                "design_cursor",
                 "select",
-                id=seed.id,
-                case_type=seed.cell.case_type,
-                difficulty=seed.cell.difficulty,
-                scenario=seed.cell.scenario,
-                remaining=len(seeds),
+                id=design.id,
+                case_type=design.cell.case_type,
+                difficulty=design.cell.difficulty,
+                scenario=design.cell.scenario,
+                remaining=len(designs),
             )
         return {
-            "seeds_queue": seeds,
-            "seed": seed,
+            "designs_queue": designs,
+            "design": design,
             "gen_attempt": 0,
             "gen_retry_route_code": None,
             "gen_retry_subcodes": [],
@@ -363,58 +370,58 @@ class PipelineRunner:
             "last_decision": None,
         }
 
-    def node_audit_seed_plan(self, state: PipelineState) -> PipelineState:
-        seed = _require(state.get("seed"), "seed")
-        self._progress("plan_audit", "start", seed=seed.id, case_type=seed.cell.case_type)
-        verdict, route_code, subcodes = validate_seed_plan([seed], self.config.domain)
+    def node_audit_design(self, state: PipelineState) -> PipelineState:
+        design = _require(state.get("design"), "design")
+        self._progress("design_audit", "start", design=design.id, case_type=design.cell.case_type)
+        verdict, route_code, subcodes = validate_design_batch([design], self.config.domain)
         if verdict == Verdict.REJECT:
-            plan_verdict = _local_plan_verdict(seed, route_code, subcodes)
+            design_verdict = _local_design_verdict(design, route_code, subcodes)
             meta = _local_meta()
         else:
-            plan_verdict, meta = self.plan_auditor.audit(seed)
+            design_verdict, meta = self.design_auditor.audit(design)
         decision = route_after(
             run_id=self.config.run_id,
-            from_stage=StageKind.PLAN_AUDIT,
-            verdict=plan_verdict.verdict,
-            route_code=plan_verdict.route_code,
+            from_stage=StageKind.DESIGN_AUDIT,
+            verdict=design_verdict.verdict,
+            route_code=design_verdict.route_code,
             retry_index=0,
-            max_plan_retries=self.config.domain.max_plan_retries,
-            subcodes=plan_verdict.subcodes,
-            reason_codes=plan_verdict.reason_codes,
+            max_design_retries=self.config.domain.max_design_retries,
+            subcodes=design_verdict.subcodes,
+            reason_codes=design_verdict.reason_codes,
         )
         self._record(
-            stage_kind=StageKind.PLAN_AUDIT,
-            role="audit_seed_plan",
-            agent_role=AgentRole.PLAN_AUDITOR if meta["provider"] != "local" else None,
-            artifact_id=f"{seed.id}-plan-verdict",
-            parent_artifact_id=seed.id,
-            verdict=plan_verdict.verdict,
-            route_code=plan_verdict.route_code,
-            subcodes=plan_verdict.subcodes,
-            reason_codes=plan_verdict.reason_codes,
+            stage_kind=StageKind.DESIGN_AUDIT,
+            role="audit_design",
+            agent_role=AgentRole.DESIGN_AUDITOR if meta["provider"] != "local" else None,
+            artifact_id=f"{design.id}-design-verdict",
+            parent_artifact_id=design.id,
+            verdict=design_verdict.verdict,
+            route_code=design_verdict.route_code,
+            subcodes=design_verdict.subcodes,
+            reason_codes=design_verdict.reason_codes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=meta,
         )
         update: PipelineState = {"last_decision": decision}
-        if plan_verdict.verdict == Verdict.REJECT:
-            self.rejections.append(seed, decision)
+        if design_verdict.verdict == Verdict.REJECT:
+            self.rejections.append(design, decision)
             update["dropped_count"] = state["dropped_count"] + 1
         return update
 
     def node_generate(self, state: PipelineState) -> PipelineState:
-        seed = _require(state.get("seed"), "seed")
+        design = _require(state.get("design"), "design")
         retry_index = state["gen_attempt"]
         self._progress(
             "generation",
             "start",
-            seed=seed.id,
+            design=design.id,
             attempt=retry_index + 1,
             retry=state.get("gen_retry_route_code"),
         )
         try:
             candidate, gen_meta = self.generator.generate(
                 run_id=self.config.run_id,
-                seed=seed,
+                design=design,
                 attempt=retry_index + 1,
                 retry_route_code=state.get("gen_retry_route_code"),
                 retry_subcodes=state.get("gen_retry_subcodes"),
@@ -435,8 +442,8 @@ class PipelineRunner:
                 stage_kind=StageKind.GENERATION,
                 role="generate_candidate_sample",
                 agent_role=AgentRole.SAMPLE_GENERATOR,
-                artifact_id=f"{seed.id}-generation-error-{retry_index}",
-                parent_artifact_id=seed.id,
+                artifact_id=f"{design.id}-generation-error-{retry_index}",
+                parent_artifact_id=design.id,
                 verdict=Verdict.REJECT,
                 route_code=decision.route_code,
                 subcodes=["provider_error"],
@@ -467,7 +474,7 @@ class PipelineRunner:
             role="generate_candidate_sample",
             agent_role=AgentRole.SAMPLE_GENERATOR,
             artifact_id=candidate.id,
-            parent_artifact_id=seed.id,
+            parent_artifact_id=design.id,
             verdict=Verdict.ACCEPT,
             route_code=RouteCode.ACCEPT,
             context_policy=_producer_context_policy(state.get("gen_retry_route_code")),
@@ -543,9 +550,10 @@ class PipelineRunner:
         return update
 
     def node_adversary(self, state: PipelineState) -> PipelineState:
+        design = _require(state.get("design"), "design")
         candidate = _require(state.get("candidate"), "candidate")
         self._progress("adversary", "start", candidate=candidate.id)
-        report, meta = self.adversary.attack(candidate)
+        report, meta = self.adversary.attack(candidate, design)
         self.writer.append_adversary_report(report)
         self._record(
             stage_kind=StageKind.VALIDATION,
@@ -564,25 +572,60 @@ class PipelineRunner:
             "reported",
             candidate=candidate.id,
             attacks=len(report.attacks),
+            disposition=report.revision_disposition,
         )
+        if report.revision_disposition == "nuke":
+            decision = route_after(
+                run_id=self.config.run_id,
+                from_stage=StageKind.VALIDATION,
+                verdict=Verdict.REJECT,
+                route_code=RouteCode.REJECT_SEMANTIC_MISMATCH,
+                retry_index=state["gen_attempt"],
+                max_generation_retries=self.config.domain.max_generation_retries,
+                subcodes=["adversary_nuke"],
+                reason_codes=["adversary_nuke"],
+            )
+            self.rejections.append(candidate, decision)
+            self._progress(
+                "candidate",
+                "rejected",
+                **_candidate_progress(candidate),
+                route=decision.route_code,
+                codes=decision.reason_codes or decision.subcodes,
+            )
+            update: PipelineState = {
+                "adversary_report": report,
+                "adversary_done": True,
+                "det_accepted": False,
+                "last_decision": decision,
+            }
+            if decision.terminal:
+                update["dropped_count"] = state["dropped_count"] + 1
+            else:
+                update["gen_attempt"] = state["gen_attempt"] + 1
+                update["gen_retry_route_code"] = decision.route_code
+                update["gen_retry_subcodes"] = decision.subcodes
+            return update
+        if report.revision_disposition == "pass":
+            return {"adversary_report": report, "adversary_done": True, "last_decision": None}
         return {"adversary_report": report, "last_decision": None}
 
     def node_revise_from_adversary(self, state: PipelineState) -> PipelineState:
-        seed = _require(state.get("seed"), "seed")
+        design = _require(state.get("design"), "design")
         candidate = _require(state.get("candidate"), "candidate")
         report = _require(state.get("adversary_report"), "adversary_report")
         attempt = state["gen_attempt"] + 1
         self._progress(
             "generation",
             "revise",
-            seed=seed.id,
+            design=design.id,
             candidate=candidate.id,
             attacks=len(report.attacks),
         )
         try:
             revised, meta = self.generator.revise_from_attack(
                 run_id=self.config.run_id,
-                seed=seed,
+                design=design,
                 candidate=candidate,
                 report=report,
                 attempt=attempt,
@@ -667,7 +710,7 @@ class PipelineRunner:
                 "phase": phase,
                 "role": role,
                 "candidate_id": candidate.id,
-                "seed_id": candidate.seed_id,
+                "design_id": candidate.design_id,
                 "parent_candidate_id": parent_candidate_id,
                 "adversary_report_id": adversary_report_id,
                 "retry_index": retry_index,
@@ -721,6 +764,13 @@ class PipelineRunner:
         candidate = _require(state.get("candidate"), "candidate")
         quality_verdict = _require(state.get("quality_verdict"), "quality_verdict")
         rubric_verdict = _require(state.get("rubric_verdict"), "rubric_verdict")
+        self._progress(
+            "join_gates",
+            "start",
+            candidate=candidate.id,
+            quality=quality_verdict.verdict,
+            rubric=rubric_verdict.verdict,
+        )
         verdict = quality_verdict if quality_verdict.verdict == Verdict.REJECT else rubric_verdict
         decision = route_after(
             run_id=self.config.run_id,
@@ -909,19 +959,19 @@ def _producer_context_policy(retry_route_code: RouteCode | None) -> ContextPolic
 
 
 def _graph_recursion_limit(config: RuntimeConfig) -> int:
-    plan_rounds = config.domain.max_plan_retries + 1
-    seeds_per_round = max(1, config.target_n * 2)
+    design_rounds = config.domain.max_design_retries + 1
+    designs_per_round = max(1, config.target_n * 2)
     generation_attempts = config.domain.max_generation_retries + 1
-    per_seed_steps = 2 + (generation_attempts * 4) + 1
-    plan_steps = 2
-    return 10 + plan_rounds * (plan_steps + seeds_per_round * per_seed_steps)
+    per_design_steps = 2 + (generation_attempts * 4) + 1
+    design_steps = 2
+    return 10 + design_rounds * (design_steps + designs_per_round * per_design_steps)
 
 
 def _stage_label(record: StageRecord) -> str:
-    if record.role == "validate_seed_plan_deterministically":
-        return "plan_det"
-    if record.role == "audit_seed_plan":
-        return "plan_audit"
+    if record.role == "validate_design_batch_deterministically":
+        return "design_det"
+    if record.role == "audit_design":
+        return "design_audit"
     if record.role == "generate_candidate_sample":
         return "generation"
     if record.role == "validate_candidate_deterministically":
@@ -966,9 +1016,9 @@ def _candidate_progress(candidate: CandidateSample) -> dict[str, Any]:
     }
 
 
-def _local_plan_verdict(seed: SeedSpec, route_code: RouteCode, subcodes: list[str]) -> PlanVerdict:
-    return PlanVerdict(
-        seed_id=seed.id,
+def _local_design_verdict(design: DesignBrief, route_code: RouteCode, subcodes: list[str]) -> DesignVerdict:
+    return DesignVerdict(
+        design_id=design.id,
         verdict=Verdict.REJECT,
         route_code=route_code,
         subcodes=subcodes,

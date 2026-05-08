@@ -311,24 +311,24 @@ success meaningfully predictive?
 The top-level pipeline shape can remain mostly intact. The artifact ontology and
 agent prompts should change.
 
-### Strategist
+### Designer
 
 Current role:
 
 ```text
-Creates seed specs for Validator training data.
+Creates design briefs for Validator training data.
 ```
 
 Proposed role:
 
 ```text
-Creates benchmark seed specs that target capability coverage, environment
+Creates benchmark design briefs that target capability coverage, environment
 coverage, diagnostic pressure, scoring reliability, and leakage exploration.
 ```
 
-The Strategist should output seed specs, not benchmark cases.
+The Designer should output design briefs, not benchmark cases.
 
-Seed specs should include at least:
+Design briefs should include at least:
 
 ```text
 - ability_z or sub-ability
@@ -346,22 +346,22 @@ Open question: should `case_type` replace `failure_mode` entirely in the first
 patch, or should we keep `failure_mode` internally for compatibility and rename
 later?
 
-### Plan Auditor
+### Design Auditor
 
 Current role:
 
 ```text
-Checks whether a seed matches the domain criteria.
+Checks whether a design matches the domain criteria.
 ```
 
 Proposed role:
 
 ```text
 Rejects vague, non-diagnostic, unscorable, irrelevant, or underspecified
-benchmark seed specs before generation.
+benchmark design briefs before generation.
 ```
 
-The Plan Auditor should not rewrite seeds. It should emit verdict metadata only.
+The Design Auditor should not rewrite designs. It should emit verdict metadata only.
 
 Potential rejection reasons:
 
@@ -374,7 +374,7 @@ Potential rejection reasons:
 - scoring_contract_missing
 - leakage_unaddressed
 - coverage_mismatch
-- duplicate_seed
+- duplicate_design
 ```
 
 ### Generator
@@ -565,7 +565,7 @@ Possible replacement:
 ```json
 {
   "id": "candidate-1",
-  "seed_id": "seed-1",
+  "design_id": "design-1",
   "content_hash": "...",
   "cell": {
     "case_type": "shortcut_leakage",
@@ -954,8 +954,8 @@ should docs and commands switch immediately?
 Likely changes:
 
 ```text
-- Strategist prompt: benchmark seed specs for X/Z/Y proxy coverage.
-- PlanAuditor prompt: reject non-diagnostic or unscorable seeds.
+- Designer prompt: benchmark design briefs for X/Z/Y proxy coverage.
+- DesignAuditor prompt: reject non-diagnostic or unscorable designs.
 - SampleGenerator prompt: benchmark cases plus proxy/scoring metadata.
 - SemanticValidator prompt: adversarial proxy validity and score reliability
   critic.
@@ -983,7 +983,7 @@ Likely changes:
 
 ```text
 - Mostly preserve graph shape.
-- Update progress labels that print `mode=seed.cell.failure_mode`.
+- Update progress labels that print `mode=design.cell.failure_mode`.
 - Update commit/coverage calls if TaxonomyCell changes.
 - Possibly rename stage roles in logs for readability.
 ```
@@ -1098,8 +1098,8 @@ examples.
 Work:
 
 ```text
-- Update Strategist prompt.
-- Update PlanAuditor prompt.
+- Update Designer prompt.
+- Update DesignAuditor prompt.
 - Update SampleGenerator prompt and parsing.
 - Update deterministic validation.
 - Update SemanticValidator prompt.

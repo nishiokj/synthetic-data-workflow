@@ -65,7 +65,7 @@ subcodes:
   - unknown_case_type
   - unknown_difficulty
   - unknown_scenario
-  - duplicate_seed
+  - duplicate_design
   - near_duplicate
   - provider_error
 
@@ -86,7 +86,7 @@ reason_codes:
   - near_duplicate
 
 novelty_threshold: 0.08
-max_plan_retries: 2
+max_design_retries: 2
 max_generation_retries: 2
 
 deterministic_rules:

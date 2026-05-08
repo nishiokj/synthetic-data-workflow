@@ -19,16 +19,16 @@ def stable_hash(value: Any) -> str:
 
 
 class StageKind(str, Enum):
-    STRATEGY = "strategy"
-    PLAN_AUDIT = "plan_audit"
+    DESIGN = "design"
+    DESIGN_AUDIT = "design_audit"
     GENERATION = "generation"
     VALIDATION = "validation"
     CURATION = "curation"
 
 
 class AgentRole(str, Enum):
-    STRATEGIST = "strategist"
-    PLAN_AUDITOR = "plan_auditor"
+    DESIGNER = "designer"
+    DESIGN_AUDITOR = "design_auditor"
     SAMPLE_GENERATOR = "sample_generator"
     ADVERSARY = "adversary"
     SEMANTIC_VALIDATOR = "semantic_validator"
@@ -100,66 +100,86 @@ class InnerCriteria(BaseModel):
     requires_context: bool = False
 
 
-class SeedSpec(BaseModel):
+class DesignBrief(BaseModel):
     id: str
     target_stage: Literal["benchmark"] = "benchmark"
     cell: TaxonomyCell
-    intent: str
-    ability: str
-    environment: str
-    environment_seed: dict[str, Any] = Field(default_factory=dict)
-    diagnostic_pressure: str
-    scoring_strategy: str
-    leakage_risk: str
-    parent_plan_id: Optional[str] = None
+    target_ability: str
+    target_environment: str
+    design_intent: str
+    environment_premise: dict[str, Any] = Field(default_factory=dict)
+    failure_mode_family: str
+    diagnostic_pressure: list[str] = Field(default_factory=list)
+    why_weak_agents_fail: list[str] = Field(default_factory=list)
+    tempting_shallow_solutions: list[str] = Field(default_factory=list)
+    success_evidence_required: list[str] = Field(default_factory=list)
+    minimum_depth_requirements: list[str] = Field(default_factory=list)
+    forbidden_shortcuts: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    parent_design_batch_id: Optional[str] = None
     content_hash: str
 
     @classmethod
     def create(
         cls,
         *,
-        seed_id: str,
+        design_id: str,
         cell: TaxonomyCell,
-        intent: str,
-        ability: str,
-        environment: str,
-        environment_seed: Optional[dict[str, Any]] = None,
-        diagnostic_pressure: str,
-        scoring_strategy: str,
-        leakage_risk: str,
-        parent_plan_id: Optional[str] = None,
-    ) -> "SeedSpec":
+        target_ability: str,
+        target_environment: str,
+        design_intent: str,
+        environment_premise: Optional[dict[str, Any]] = None,
+        failure_mode_family: str,
+        diagnostic_pressure: list[str],
+        why_weak_agents_fail: list[str],
+        tempting_shallow_solutions: list[str],
+        success_evidence_required: list[str],
+        minimum_depth_requirements: list[str],
+        forbidden_shortcuts: list[str],
+        non_goals: list[str],
+        parent_design_batch_id: Optional[str] = None,
+    ) -> "DesignBrief":
         content_hash = stable_hash(
             {
                 "target_stage": "benchmark",
                 "cell": cell.model_dump(),
-                "intent": intent,
-                "ability": ability,
-                "environment": environment,
-                "environment_seed": environment_seed or {},
+                "target_ability": target_ability,
+                "target_environment": target_environment,
+                "design_intent": design_intent,
+                "environment_premise": environment_premise or {},
+                "failure_mode_family": failure_mode_family,
                 "diagnostic_pressure": diagnostic_pressure,
-                "scoring_strategy": scoring_strategy,
-                "leakage_risk": leakage_risk,
-                "parent_plan_id": parent_plan_id,
+                "why_weak_agents_fail": why_weak_agents_fail,
+                "tempting_shallow_solutions": tempting_shallow_solutions,
+                "success_evidence_required": success_evidence_required,
+                "minimum_depth_requirements": minimum_depth_requirements,
+                "forbidden_shortcuts": forbidden_shortcuts,
+                "non_goals": non_goals,
+                "parent_design_batch_id": parent_design_batch_id,
             }
         )
         return cls(
-            id=seed_id,
+            id=design_id,
             cell=cell,
-            intent=intent,
-            ability=ability,
-            environment=environment,
-            environment_seed=environment_seed or {},
+            target_ability=target_ability,
+            target_environment=target_environment,
+            design_intent=design_intent,
+            environment_premise=environment_premise or {},
+            failure_mode_family=failure_mode_family,
             diagnostic_pressure=diagnostic_pressure,
-            scoring_strategy=scoring_strategy,
-            leakage_risk=leakage_risk,
-            parent_plan_id=parent_plan_id,
+            why_weak_agents_fail=why_weak_agents_fail,
+            tempting_shallow_solutions=tempting_shallow_solutions,
+            success_evidence_required=success_evidence_required,
+            minimum_depth_requirements=minimum_depth_requirements,
+            forbidden_shortcuts=forbidden_shortcuts,
+            non_goals=non_goals,
+            parent_design_batch_id=parent_design_batch_id,
             content_hash=content_hash,
         )
 
 
-class PlanVerdict(BaseModel):
-    seed_id: str
+class DesignVerdict(BaseModel):
+    design_id: str
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)
@@ -170,7 +190,7 @@ class PlanVerdict(BaseModel):
 
 class CandidateSample(BaseModel):
     id: str
-    seed_id: str
+    design_id: str
     content_hash: str
     cell: TaxonomyCell
     output: dict[str, Any] = Field(default_factory=dict)
@@ -214,6 +234,8 @@ class CandidateSample(BaseModel):
 
 class AdversaryReport(BaseModel):
     candidate_id: str
+    revision_disposition: Literal["pass", "revise", "nuke"] = "revise"
+    disposition_rationale: str = ""
     attack_summary: str = ""
     attacks: list[dict[str, Any]] = Field(default_factory=list)
     cheap_pass_strategy: str = ""

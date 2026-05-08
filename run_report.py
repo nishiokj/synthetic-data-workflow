@@ -41,9 +41,9 @@ def main() -> int:
     _print_counts("Routes", Counter(stage.get("route_code") for stage in stages))
     _print_counts("Validation rejection codes", _code_counts(stage for stage in stages if stage.get("verdict") == "reject"))
 
-    stories = _seed_stories(stages, rejections, accepted)
+    stories = _design_stories(stages, rejections, accepted)
     if stories:
-        print("Seed Stories")
+        print("Design Stories")
         print("------------")
         for story in stories[-args.limit :]:
             print(_story_summary(story))
@@ -132,7 +132,7 @@ def _print_schema_warning(stages: list[dict[str, Any]], rejections: list[dict[st
         print()
 
 
-def _seed_stories(
+def _design_stories(
     stages: list[dict[str, Any]],
     rejections: list[dict[str, Any]],
     accepted: list[dict[str, Any]],
@@ -143,16 +143,16 @@ def _seed_stories(
         artifact = rejection.get("artifact", {})
         if not isinstance(artifact, dict):
             continue
-        seed_id = str(artifact.get("seed_id") or _seed_from_candidate_id(str(artifact.get("id", ""))) or "unknown-seed")
-        story = stories.setdefault(seed_id, {"seed_id": seed_id, "attempts": [], "accepted": []})
+        design_id = str(artifact.get("design_id") or _design_from_candidate_id(str(artifact.get("id", ""))) or "unknown-design")
+        story = stories.setdefault(design_id, {"design_id": design_id, "attempts": [], "accepted": []})
         story["attempts"].append({"candidate": artifact, "route": rejection.get("route", {}), "accepted": False})
 
     for item in accepted:
         candidate = item.get("candidate", {})
         if not isinstance(candidate, dict):
             continue
-        seed_id = str(candidate.get("seed_id") or _seed_from_candidate_id(str(candidate.get("id", ""))) or "unknown-seed")
-        story = stories.setdefault(seed_id, {"seed_id": seed_id, "attempts": [], "accepted": []})
+        design_id = str(candidate.get("design_id") or _design_from_candidate_id(str(candidate.get("id", ""))) or "unknown-design")
+        story = stories.setdefault(design_id, {"design_id": design_id, "attempts": [], "accepted": []})
         story["accepted"].append(candidate)
         story["attempts"].append(
             {
@@ -176,7 +176,7 @@ def _story_summary(story: dict[str, Any]) -> str:
     final_status = "accepted" if accepted else "failed"
     first_candidate = (attempts[0].get("candidate") if attempts else {}) or {}
     header = [
-        f"Seed {story.get('seed_id')}",
+        f"Design {story.get('design_id')}",
         f"final={final_status}",
         f"attempts={len(attempts)}",
         f"case={_case_type(first_candidate)}",
@@ -207,14 +207,14 @@ def _story_summary(story: dict[str, Any]) -> str:
 
 
 def _story_sort_key(story: dict[str, Any], stages: list[dict[str, Any]]) -> tuple[str, str]:
-    seed_id = str(story.get("seed_id", ""))
+    design_id = str(story.get("design_id", ""))
     timestamps = []
     for attempt in story.get("attempts", []):
         candidate_id = ((attempt.get("candidate") or {}).get("id") or "")
         for stage in stages:
             if stage.get("parent_artifact_id") == candidate_id or stage.get("artifact_id") == candidate_id:
                 timestamps.append(str(stage.get("wallclock_ts", "")))
-    return (min(timestamps) if timestamps else "", seed_id)
+    return (min(timestamps) if timestamps else "", design_id)
 
 
 def _attempt_sort_key(attempt: dict[str, Any]) -> tuple[str, int]:
@@ -228,7 +228,7 @@ def _attempt_number(candidate: dict[str, Any], fallback: int) -> int:
     return int(tail) if tail.isdigit() else fallback
 
 
-def _seed_from_candidate_id(candidate_id: str) -> str | None:
+def _design_from_candidate_id(candidate_id: str) -> str | None:
     marker = "-candidate-"
     if marker not in candidate_id:
         return None
@@ -313,13 +313,20 @@ def _artifact_schema(candidate: dict[str, Any]) -> str:
 
 def _stage_is_current(stage: dict[str, Any]) -> bool:
     current_roles = {
+        "design_batch",
+        "validate_design_batch_deterministically",
+        "audit_design",
         "generate_candidate_sample",
+        "adversary_attack_report",
         "quality_gate_candidate",
         "rubric_gate_candidate",
         "curate_committed_sample",
     }
     current_agents = {
+        "designer",
+        "design_auditor",
         "sample_generator",
+        "adversary",
         "quality_gate",
         "rubric_gate",
     }

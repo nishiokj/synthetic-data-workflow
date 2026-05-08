@@ -28,7 +28,7 @@ shape their prompts.
 3. One conditional-edge function `route_from_decision(state)` reads
    `state.last_decision.next_stage` and dispatches to the corresponding node or
    `END`. It is reused on every routed edge.
-4. Producer prompts (`Strategist`, `SampleGenerator`) accept a `retry_route_code`
+4. Producer prompts (`Designer`, `SampleGenerator`) accept a `retry_route_code`
    /`retry_subcodes` pair. When set, the system prompt frames the call as a
    retry and includes route code + descriptive subcodes only — never judge
    prose, never the prior failed artifact (PLAN.md §7
@@ -38,16 +38,16 @@ shape their prompts.
 
 `pipeline.py`:
 
-- `PipelineRunner.run()` body (the outer `while plan_round <= max_plan_retries`
+- `PipelineRunner.run()` body (the outer `while plan_round <= max_design_retries`
   loop)
-- `_plan_strategy_batch()` — re-emerges as `node_strategy`
-- `_audit_seed_plan()` — re-emerges as `node_audit_seed_plan`
+- `_design_batch()` — re-emerges as `node_design`
+- `_audit_design()` — re-emerges as `node_audit_design`
 - `_run_seed()` — the `for attempt in range(...)` retry loop disappears
   entirely; retries become graph cycles driven by `route_from_decision`
 - `_validate_and_curate()` — splits into `node_validate_det`,
   `node_validate_semantic`, `node_curate`
 - `_local_plan_verdict()` — moves to a top-level helper or inlines into
-  `node_validate_seed_plan_det`
+  `node_validate_design_batch_det`
 - All `if decision.terminal: break` branches — replaced by the conditional
   edge mapping `decision.terminal` to `END`
 - All `for attempt in range(...)` retry counters — replaced by the router's
@@ -76,7 +76,7 @@ Pin during install. The migration uses only `StateGraph`, `START`, `END`, and
 from typing import TypedDict
 from models import (
     CandidateSample, CertifiedSample, CheckResult, RouteCode, RoutingDecision,
-    SampleVerdict, SeedSpec,
+    SampleVerdict, DesignBrief,
 )
 
 class PipelineState(TypedDict, total=False):
@@ -84,16 +84,16 @@ class PipelineState(TypedDict, total=False):
     run_id: str
     target_n: int
 
-    # plan-round state (router consults this for plan retries)
+    # plan-round state (router consults this for design retries)
     plan_round: int                    # router's retry_index for plan stage
     plan_retry_route_code: RouteCode | None
     plan_retry_subcodes: list[str]
 
     # batch state
-    seeds_queue: list[SeedSpec]
+    designs_queue: list[DesignBrief]
 
-    # per-seed state
-    seed: SeedSpec | None
+    # per-design state
+    design: DesignBrief | None
     gen_attempt: int                   # router's retry_index for gen/validation
     gen_retry_route_code: RouteCode | None
     gen_retry_subcodes: list[str]
@@ -117,10 +117,10 @@ closed over by node functions — they do not live in state.
 
 | Node name | Replaces | Stage logged | Calls router on |
 |---|---|---|---|
-| `strategy` | `_plan_strategy_batch` | STRATEGY | empty seed list (terminal/retry) |
-| `validate_seed_plan_det` | `validate_seed_plan` batch call | PLAN_AUDIT (det) | every call |
-| `select_next_seed` | `for seed in seeds:` head | (none, orchestration) | never |
-| `audit_seed_plan` | `_audit_seed_plan` | PLAN_AUDIT (LLM) | every call (per-seed reject is treated as drop, not replan — see Behavior changes #1) |
+| `design` | `_design_batch` | DESIGN | empty design list (terminal/retry) |
+| `validate_design_batch_det` | `validate_design_batch` batch call | PLAN_AUDIT (det) | every call |
+| `select_next_design` | `for design in designs:` head | (none, orchestration) | never |
+| `audit_design` | `_audit_design` | PLAN_AUDIT (LLM) | every call (per-design reject is treated as drop, not replan — see Behavior changes #1) |
 | `generate` | `generator.generate(...)` block | GENERATION | every call |
 | `validate_det` | `deterministic_sample_verdict` block | VALIDATION (det) | every call |
 | `validate_semantic` | `semantic_validator.validate(...)` block | VALIDATION (sem) | every call |
@@ -145,8 +145,8 @@ def route_from_decision(state: PipelineState) -> str:
     if decision.terminal:
         return END
     return {
-        StageKind.STRATEGY: "strategy",
-        StageKind.PLAN_AUDIT: "audit_seed_plan",
+        StageKind.DESIGN: "design",
+        StageKind.PLAN_AUDIT: "audit_design",
         StageKind.GENERATION: "generate",
         StageKind.VALIDATION: "validate_det",
         StageKind.CURATION: "curate",
@@ -159,35 +159,35 @@ Two orchestration-only edges (do not consult the router):
 def after_curate(state: PipelineState) -> str:
     if state["committed_count"] >= state["target_n"]:
         return END
-    if state["seeds_queue"]:
-        return "select_next_seed"
-    return "strategy"   # next plan round; retry budget enforced by router
+    if state["designs_queue"]:
+        return "select_next_design"
+    return "design"   # next plan round; retry budget enforced by router
                         # the first time the new round produces a reject
 
-def after_select_next_seed(state: PipelineState) -> str:
-    return "audit_seed_plan" if state["seed"] else "strategy"
+def after_select_next_design(state: PipelineState) -> str:
+    return "audit_design" if state["design"] else "design"
 
-def after_audit_seed_plan(state: PipelineState) -> str:
-    # Per-seed plan reject is a drop, not a replan trigger. Always advance.
+def after_audit_design(state: PipelineState) -> str:
+    # Per-design plan reject is a drop, not a replan trigger. Always advance.
     decision = state["last_decision"]
     if decision.verdict == Verdict.ACCEPT:
         return "generate"
-    return "select_next_seed" if state["seeds_queue"] else "strategy"
+    return "select_next_design" if state["designs_queue"] else "design"
 ```
 
 #### Graph wiring
 
 ```
-START                       -> strategy
-strategy                    -> validate_seed_plan_det          (always)
-validate_seed_plan_det      -> route_from_decision
-                                 PLAN_AUDIT -> select_next_seed
-                                 STRATEGY   -> strategy
+START                       -> design
+design                      -> validate_design_batch_det          (always)
+validate_design_batch_det      -> route_from_decision
+                                 PLAN_AUDIT -> select_next_design
+                                 DESIGN   -> design
                                  END        -> END
-select_next_seed            -> after_select_next_seed
-                                 audit_seed_plan / strategy
-audit_seed_plan             -> after_audit_seed_plan
-                                 generate / select_next_seed / strategy
+select_next_design            -> after_select_next_design
+                                 audit_design / design
+audit_design             -> after_audit_design
+                                 generate / select_next_design / design
 generate                    -> route_from_decision
                                  VALIDATION -> validate_det
                                  GENERATION -> generate
@@ -201,7 +201,7 @@ validate_semantic           -> route_from_decision
                                  GENERATION -> generate
                                  END        -> END
 curate                      -> after_curate
-                                 select_next_seed / strategy / END
+                                 select_next_design / design / END
 ```
 
 Note: `validate_det` accepting promotes to `validate_semantic`. The router
@@ -239,19 +239,19 @@ class PipelineRunner:
 
     def _build_graph(self) -> StateGraph:
         g = StateGraph(PipelineState)
-        g.add_node("strategy", self.node_strategy)
-        g.add_node("validate_seed_plan_det", self.node_validate_seed_plan_det)
-        g.add_node("select_next_seed", self.node_select_next_seed)
-        g.add_node("audit_seed_plan", self.node_audit_seed_plan)
+        g.add_node("design", self.node_design)
+        g.add_node("validate_design_batch_det", self.node_validate_design_batch_det)
+        g.add_node("select_next_design", self.node_select_next_design)
+        g.add_node("audit_design", self.node_audit_design)
         g.add_node("generate", self.node_generate)
         g.add_node("validate_det", self.node_validate_det)
         g.add_node("validate_semantic", self.node_validate_semantic)
         g.add_node("curate", self.node_curate)
-        g.add_edge(START, "strategy")
-        g.add_edge("strategy", "validate_seed_plan_det")
-        g.add_conditional_edges("validate_seed_plan_det", route_from_decision)
-        g.add_conditional_edges("select_next_seed", after_select_next_seed)
-        g.add_conditional_edges("audit_seed_plan", after_audit_seed_plan)
+        g.add_edge(START, "design")
+        g.add_edge("design", "validate_design_batch_det")
+        g.add_conditional_edges("validate_design_batch_det", route_from_decision)
+        g.add_conditional_edges("select_next_design", after_select_next_design)
+        g.add_conditional_edges("audit_design", after_audit_design)
         g.add_conditional_edges("generate", route_from_decision)
         g.add_conditional_edges("validate_det", after_validate_det)
         g.add_conditional_edges("validate_semantic", route_from_decision)
@@ -263,7 +263,7 @@ class PipelineRunner:
             "run_id": self.config.run_id,
             "target_n": self.config.target_n,
             "plan_round": 0,
-            "seeds_queue": [],
+            "designs_queue": [],
             "gen_attempt": 0,
             "committed_count": 0,
             "dropped_count": 0,
@@ -283,7 +283,7 @@ class PipelineRunner:
 
 ### `agents.py`
 
-`Strategist.plan(...)` adds two optional parameters:
+`Designer.plan(...)` adds two optional parameters:
 
 ```python
 def plan(
@@ -294,7 +294,7 @@ def plan(
     coverage_snapshot: dict[str, int],
     retry_route_code: RouteCode | None = None,
     retry_subcodes: list[str] | None = None,
-) -> tuple[list[SeedSpec], dict[str, Any]]:
+) -> tuple[list[DesignBrief], dict[str, Any]]:
 ```
 
 When `retry_route_code` is set, prepend a single line to the user payload:
@@ -307,12 +307,12 @@ When `retry_route_code` is set, prepend a single line to the user payload:
 ```
 
 Keep the system prompt as-is (must continue to start with `"You are the
-Strategist..."` so the smoke-test fake routes correctly via substring match).
+Designer..."` so the smoke-test fake routes correctly via substring match).
 
 `SampleGenerator.generate(...)` mirrors this change with `retry_route_code` /
 `retry_subcodes`. System prompt unchanged.
 
-`PlanAuditor.audit(...)` and `SemanticValidator.validate(...)`: no change.
+`DesignAuditor.audit(...)` and `SemanticValidator.validate(...)`: no change.
 Judges are stateless and use `CRITERIA_ONLY`.
 
 ### `router.py`
@@ -320,31 +320,31 @@ Judges are stateless and use `CRITERIA_ONLY`.
 No code change required. The existing branches are correct once `next_stage`
 is consumed.
 
-Optional cleanup: `from_stage=STRATEGY` branch with `verdict=REJECT` returns
-`terminal=True, next_stage=None`. After migration, `node_strategy` calls
-`route_after` only when seeds are empty — and the router currently treats that
-as a hard terminal. We want the empty-seeds case to retry within the plan
+Optional cleanup: `from_stage=DESIGN` branch with `verdict=REJECT` returns
+`terminal=True, next_stage=None`. After migration, `node_design` calls
+`route_after` only when designs are empty — and the router currently treats that
+as a hard terminal. We want the empty-designs case to retry within the plan
 budget. Two options:
 
-- **Recommended:** in `node_strategy`, when seeds are empty, do not call
-  `route_after(from_stage=STRATEGY)`. Instead increment `plan_round` and let
-  the graph re-enter `strategy` via the orchestration edge. The plan retry
-  budget is already enforced by `node_validate_seed_plan_det` calling
+- **Recommended:** in `node_design`, when designs are empty, do not call
+  `route_after(from_stage=DESIGN)`. Instead increment `plan_round` and let
+  the graph re-enter `design` via the orchestration edge. The plan retry
+  budget is already enforced by `node_validate_design_batch_det` calling
   `route_after(from_stage=PLAN_AUDIT, retry_index=plan_round)` on the next
-  pass. This means an empty Strategist response counts as one consumed plan
+  pass. This means an empty Designer response counts as one consumed plan
   round.
-- Alternative: extend the `STRATEGY` branch in `route_after` to support
+- Alternative: extend the `DESIGN` branch in `route_after` to support
   `RETRY_PROVIDER_EMPTY` as a retryable reject. Larger router change. Skip.
 
 ## Behavior changes (intentional)
 
 These should be called out in the PR description.
 
-1. **Per-seed plan reject** changes from "drop and continue with next seed in
+1. **Per-design plan reject** changes from "drop and continue with next design in
    batch" to ... the same thing. The new orchestration edge
-   `after_audit_seed_plan` preserves the existing behavior. Calling out
+   `after_audit_design` preserves the existing behavior. Calling out
    explicitly because a naive port of `route_from_decision` to this edge would
-   trigger a full replan on any per-seed reject — wrong.
+   trigger a full replan on any per-design reject — wrong.
 2. **Validation reject → Generation resample** today: pure resample with
    `FRESH` context (Generator prompt has no failure context). After migration:
    the `node_generate` reads `state["gen_retry_route_code"]` /
@@ -352,7 +352,7 @@ These should be called out in the PR description.
    `CRITERIA_PLUS_ROUTE_CODE`. **This closes the PLAN.md §7 / §8 gap**, where
    the router was computing `CRITERIA_PLUS_ROUTE_CODE` and the producer was
    ignoring it.
-3. **Empty Strategist output** today: silently spins the outer while loop.
+3. **Empty Designer output** today: silently spins the outer while loop.
    After migration: counts as one consumed plan round and the run terminates
    cleanly with `DROP_RETRY_EXHAUSTED` if every plan round comes back empty.
 4. **`decision.terminal`** changes from "consulted in 1 place" to "consulted
@@ -377,8 +377,8 @@ These should be called out in the PR description.
 - `tests/test_pipeline_smoke.py` — passes unchanged. The fake monkeypatches
   `pipeline.OpenAIClient`, the new pipeline keeps that import, and
   `PipelineRunner(config).run()` returns the same dict shape with the same
-  side-effect file paths. **Constraint:** keep `"Strategist"`,
-  `"Plan Auditor"`, `"Sample Generator"`, `"Semantic Validator"` as substrings
+  side-effect file paths. **Constraint:** keep `"Designer"`,
+  `"Design Auditor"`, `"Sample Generator"`, `"Semantic Validator"` as substrings
   in the respective system prompts so the fake's substring routing still
   works.
 - New `tests/test_pipeline_graph.py`:
@@ -386,7 +386,7 @@ These should be called out in the PR description.
   - `route_from_decision` returns the correct node name for each
     `(next_stage, terminal)` combination. Build a synthetic `PipelineState`
     with a `RoutingDecision` and assert.
-  - `after_curate`, `after_select_next_seed`, `after_audit_seed_plan` each
+  - `after_curate`, `after_select_next_design`, `after_audit_design` each
     cover their branches with one-line state stubs.
 
 ## Order of operations
@@ -396,21 +396,21 @@ Each step ends with a passing `pytest`. Do not stack steps.
 1. Add `langgraph` to `requirements.txt`. Install. Confirm
    `from langgraph.graph import StateGraph, START, END` imports.
 2. Add `PipelineState`, `route_from_decision`, `after_curate`,
-   `after_select_next_seed`, `after_audit_seed_plan`, `after_validate_det` to
+   `after_select_next_design`, `after_audit_design`, `after_validate_det` to
    `pipeline.py` as module-level definitions. Do not wire them yet. Run tests.
 3. Add `node_*` methods on `PipelineRunner` as no-ops that only call
    `self._record(...)` with placeholder data. Add `_build_graph()` and
    `compile()`. Do not switch `run()` over yet. Run tests.
 4. Port logic into nodes one at a time, in this order:
-   `node_strategy` → `node_validate_seed_plan_det` →
-   `node_select_next_seed` → `node_audit_seed_plan` → `node_generate` →
+   `node_design` → `node_validate_design_batch_det` →
+   `node_select_next_design` → `node_audit_design` → `node_generate` →
    `node_validate_det` → `node_validate_semantic` → `node_curate`. Each port
    is a separate commit. The smoke test stays passing throughout because
    `run()` still uses the old hand-rolled body.
 5. Switch `run()` to call `self.graph.invoke(initial)`. Run tests.
-6. Delete the old `_plan_strategy_batch`, `_audit_seed_plan`, `_run_seed`,
+6. Delete the old `_design_batch`, `_audit_design`, `_run_seed`,
    `_validate_and_curate`, `_local_plan_verdict`. Run tests.
-7. Update `Strategist.plan` and `SampleGenerator.generate` signatures to accept
+7. Update `Designer.plan` and `SampleGenerator.generate` signatures to accept
    retry context. Update the two corresponding nodes to pass the retry context
    through from state. Run tests.
 8. Add `tests/test_pipeline_graph.py`. Run tests.
@@ -428,6 +428,6 @@ These are flagged in the audit but are not part of this patch:
 - Splitting the conflated retry budget for content vs. infra/parse
 - Missing length-bound and conditional context-non-empty deterministic rules
 - README pipeline-diagram naming drift
-- Strategist not receiving aggregate route-code summaries
+- Designer not receiving aggregate route-code summaries
 
 These should land in separate commits after the migration is in.

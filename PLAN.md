@@ -42,7 +42,7 @@ state transitions.
    and receive artifact + criteria only — never producer reasoning.
 3. **Deterministic wherever possible.** LLM calls are reserved for semantic
    checks, subjective criteria, and generation. Curator is fully deterministic;
-   Validator and Plan Judge may combine deterministic checks with LLM semantic
+   Validator and Design Auditor may combine deterministic checks with LLM semantic
    checks.
 4. **No modification.** Every judge verdict is `ACCEPT | REJECT` plus fixed
    route codes, subcodes, reason codes, and evidence references. A judge never
@@ -70,7 +70,7 @@ state transitions.
 | Pitfall | Defense |
 |---|---|
 | Model/mode collapse | Curator embedding-novelty gate + pairwise-distance monitoring |
-| Shallow diversity | Coverage ledger drives Strategist; Plan Judge rejects near-duplicates at plan time |
+| Shallow diversity | Coverage ledger drives Designer; Design Auditor rejects near-duplicates at plan time |
 | Coverage gaps | Taxonomy cells + bias toward undercovered cells |
 | Reward hacking | Role separation; stateless judges with independent criteria |
 | Label/solution leakage | Deterministic regex + schema checks in Validator |
@@ -122,7 +122,7 @@ Judges must not emit:
 
 ```
   ┌────────────┐      ┌──────────────────┐      ┌───────────┐
-  │ Strategist │ ───► │   Plan Judge     │ ───► │ Generator │ ──┐
+  │ Designer │ ───► │   Design Auditor     │ ───► │ Generator │ ──┐
   └────────────┘      │  (det + LLM)     │      └───────────┘   │
        ▲              └──────────────────┘                      │
        │                      │                                 ▼
@@ -145,10 +145,10 @@ Judges must not emit:
 
 | Stage | Det / LLM | Input | Output | Post-hoc outcome metric |
 |---|---|---|---|---|
-| Strategist | LLM | `DomainSpec`, `CoverageLedger` snapshot, aggregate route-code summaries | `list[SeedSpec]` | fraction of seeds approved by Plan Judge |
-| Plan Judge (det) | Det | `list[SeedSpec]`, corpus index | accepted seeds + `PlanVerdict` records | n/a (filter) |
-| Plan Judge (LLM) | LLM | novelty-filtered seeds, taxonomy, plan criteria | `PlanVerdict` records only | downstream commit rate per seed |
-| Generator | LLM | one approved seed, inner-candidate schema, reason-code taxonomy | `Candidate` (a Validator training example) | fraction passing Validator |
+| Designer | LLM | `DomainSpec`, `CoverageLedger` snapshot, aggregate route-code summaries | `list[DesignBrief]` | fraction of designs approved by Design Auditor |
+| Design Auditor (det) | Det | `list[DesignBrief]`, corpus index | accepted designs + `DesignVerdict` records | n/a (filter) |
+| Design Auditor (LLM) | LLM | novelty-filtered designs, taxonomy, plan criteria | `DesignVerdict` records only | downstream commit rate per design |
+| Generator | LLM | one approved design, inner-candidate schema, reason-code taxonomy | `Candidate` (a Validator training example) | fraction passing Validator |
 | Validator (det) | Det | `Candidate`, schema, leakage rules | deterministic `SampleVerdict` | fraction passing Curator |
 | Validator (LLM) | LLM | `Candidate`, semantic criteria, deterministic verdict trail | semantic `SampleVerdict` | fraction passing Curator |
 | Curator | Det | `CertifiedSample`, corpus index, coverage ledger | `CommittedSample`, ledger + index updates | diversity metrics over corpus |
@@ -157,9 +157,9 @@ Logged outcome metrics are **not** computed in-loop and are never shown to the
 agent performing the work. They fall out of the Stage Run Log via `analyze.py`
 post-hoc.
 
-`Plan Judge (LLM)` is a judge, not an enricher. If seed enrichment becomes
+`Design Auditor (LLM)` is a judge, not an enricher. If design enrichment becomes
 useful, it must be introduced as a separate producer stage, then judged by a
-Plan Judge.
+Design Auditor.
 
 ## 7. Routing and outcome contract
 
@@ -258,8 +258,8 @@ to an earlier semantic stage.
 
 | Boundary | On REJECT | Bound | Rationale |
 |---|---|---|---|
-| Strategist → Plan Judge | **Re-plan**: produce a fresh plan from criteria + route-code summary | N=2 then drop batch | Plan failure may indicate a bad cell choice or duplicate plan. The producer should rediscover the issue, not implement judge advice. |
-| Generator → Validator (det or semantic) | **Pure resample** for content failures; **same-input retry** only for infra/parse failures | N=2 then drop seed | Content feedback biases surface fixes. Infra failures are not semantic signal. |
+| Designer → Design Auditor | **Re-plan**: produce a fresh plan from criteria + route-code summary | N=2 then drop batch | Plan failure may indicate a bad cell choice or duplicate plan. The producer should rediscover the issue, not implement judge advice. |
+| Generator → Validator (det or semantic) | **Pure resample** for content failures; **same-input retry** only for infra/parse failures | N=2 then drop design | Content feedback biases surface fixes. Infra failures are not semantic signal. |
 | Validator → Curator (novelty) | **Discard; log coverage-gap to ledger** | No retry | Sample is genuinely redundant; retry cannot help |
 
 POC 1 avoids true reconciliation stages unless necessary. If a reconciliation
@@ -275,8 +275,8 @@ break that the POC router cannot safely repair.
 
 | Service | Purpose | Backing (POC) |
 |---|---|---|
-| Corpus Index | Embeddings of committed samples + approved seeds. k-NN novelty queries. | OpenAI `text-embedding-3-small` + NumPy flat array on disk |
-| Coverage Ledger | Counts per taxonomy cell. Drives Strategist bias. | JSON file |
+| Corpus Index | Embeddings of committed samples + approved designs. k-NN novelty queries. | OpenAI `text-embedding-3-small` + NumPy flat array on disk |
+| Coverage Ledger | Counts per taxonomy cell. Drives Designer bias. | JSON file |
 | Validation Ledger | Per-sample verdict trail with route codes and reason codes. Feeds deterministic routing and aggregate coverage-gap feedback. | JSONL file |
 | Rejection Archive | Full rejected artifacts, verdict trail, route codes, subcodes, and evidence for future analysis. Not used for novelty memory in POC 1. | JSONL file |
 | Stage Run Log | One record per stage invocation. **This is the meta-dataset.** | JSONL file per run |
@@ -291,7 +291,7 @@ State scope:
 - Corpus index and coverage ledger are domain-scoped and dataset-version-scoped,
   not merely run-scoped, so collapse can be measured across runs.
 - Rejected artifacts are retained in the Rejection Archive, but only committed
-  samples and approved seeds enter the POC novelty index.
+  samples and approved designs enter the POC novelty index.
 
 ## 10. Data models (sketches)
 
@@ -300,14 +300,14 @@ to the upstream artifact.
 
 ```python
 class StageKind(str, Enum):
-    STRATEGY = "strategy"
+    DESIGN = "design"
     PLAN_AUDIT = "plan_audit"
     GENERATION = "generation"
     VALIDATION = "validation"
     CURATION = "curation"
 
 class AgentRole(str, Enum):
-    STRATEGIST = "strategist"
+    STRATEGIST = "designer"
     PLAN_JUDGE = "plan_judge"
     GENERATOR = "generator"
     SEMANTIC_VALIDATOR = "semantic_validator"
@@ -316,7 +316,7 @@ class Verdict(str, Enum):
     ACCEPT = "accept"
     REJECT = "reject"
 
-class SeedSpec(BaseModel):
+class DesignBrief(BaseModel):
     id: str
     target_stage: Literal["validator"]           # POC 1
     cell: TaxonomyCell                           # failure_mode × difficulty × scenario
@@ -325,11 +325,11 @@ class SeedSpec(BaseModel):
 
 class ApprovedPlan(BaseModel):
     id: str
-    seeds: list[SeedSpec]                        # accepted exactly as submitted
-    rejections: list[RejectionRecord]            # seeds dropped + route/evidence
+    designs: list[DesignBrief]                        # accepted exactly as submitted
+    rejections: list[RejectionRecord]            # designs dropped + route/evidence
 
-class PlanVerdict(BaseModel):
-    seed_id: str
+class DesignVerdict(BaseModel):
+    design_id: str
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[SubCode]
@@ -348,7 +348,7 @@ class SampleVerdict(BaseModel):
 class Candidate(BaseModel):
     """A Validator training example. This IS what the pipeline emits."""
     id: str
-    seed_id: str
+    design_id: str
     inner_input: InnerCandidate                  # the artifact the inner Validator would see
     inner_criteria: InnerCriteria                # schema + rules the inner Validator checks
     inner_verdict: Verdict                       # the ground-truth label the 4B must learn
@@ -437,7 +437,7 @@ scenario  ∈ {nominal, edge, adversarial}
 ```
 
 Taxonomy cell = `(failure_mode, difficulty, scenario)`. Coverage ledger counts
-these. Strategist samples underrepresented cells.
+these. Designer samples underrepresented cells.
 
 ## 12. Measurement
 
@@ -469,7 +469,7 @@ surface obvious failures early.
 ```
 main.py                  # CLI entrypoint
 pipeline.py              # LangGraph wiring: nodes, edges, retry policy
-agents.py                # LLM roles: strategist, plan_judge, generator, semantic_validator
+agents.py                # LLM roles: designer, plan_judge, generator, semantic_validator
 router.py                # RoutingDecision table + context policies
 rules.py                 # Deterministic: schema, leakage regex, length, novelty, coverage
 models.py                # Pydantic schemas (§10)
@@ -508,7 +508,7 @@ python main.py \
   --target-n 200 \
   --model gpt-5-mini \
   --provider openai \
-  --per-stage-model strategist=gpt-5-mini,plan_judge=gpt-5-mini,generator=gpt-5-mini \
+  --per-stage-model designer=gpt-5-mini,plan_judge=gpt-5-mini,generator=gpt-5-mini \
   --seed 42 \
   --run-id auto
 ```
@@ -532,12 +532,12 @@ deterministic rule set, semantic rule set, novelty threshold.
 2. **M2 — deterministic rules + services.** `rules.py` (schema, leakage,
    length), `services/*`. Unit-tested in isolation. Curator and Rejection
    Archive work.
-3. **M3 — single-seed generator slice.** Hard-code one `SeedSpec`, run
+3. **M3 — single-design generator slice.** Hard-code one `DesignBrief`, run
    Generator → Validator → Curator with an LLM call. One sample commits. Log
    records emitted.
-4. **M4 — Strategist + PlanJudge + semantic Validator + LangGraph wiring.**
+4. **M4 — Designer + PlanJudge + semantic Validator + LangGraph wiring.**
    Full pipeline one-shot, `--target-n 5`. Routing table and retry policy live.
-5. **M5 — coverage-driven sampling + feedback loop.** Strategist reads
+5. **M5 — coverage-driven sampling + feedback loop.** Designer reads
    ledger; aggregate route-code summaries feed back.
 6. **M6 — `analyze.py`.** Diversity + quality-proxy over a 200-sample run.
    Eyeball the dataset. Iterate on taxonomy / thresholds.

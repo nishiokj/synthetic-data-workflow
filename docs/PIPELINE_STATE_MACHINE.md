@@ -10,13 +10,13 @@ flowchart LR
   END((END))
 
   subgraph Planning["Planning batch"]
-    strategy["Strategy<br/>Strategist LLM<br/><code>strategy</code>"]
-    planDet["Batch plan check<br/>Deterministic judge<br/><code>validate_seed_plan_det</code>"]
+    design["Design<br/>Designer LLM<br/><code>design</code>"]
+    designDet["Batch design check<br/>Deterministic judge<br/><code>validate_design_batch_det</code>"]
   end
 
-  subgraph SeedLoop["Per-seed execution"]
-    selectSeed["Select next seed<br/>Queue cursor<br/><code>select_next_seed</code>"]
-    auditSeed["Seed plan audit<br/>PlanAuditor LLM or local reject<br/><code>audit_seed_plan</code>"]
+  subgraph DesignLoop["Per-design execution"]
+    selectDesign["Select next design<br/>Queue cursor<br/><code>select_next_design</code>"]
+    auditDesign["Design audit<br/>DesignAuditor LLM or local reject<br/><code>audit_design</code>"]
     generate["Generate benchmark case<br/>SampleGenerator LLM<br/><code>generate</code>"]
     validateDet["Deterministic validation<br/>Schema, contract, taxonomy<br/><code>validate_det</code>"]
     qualityGate["Quality gate<br/>Proxy validity LLM<br/><code>quality_gate</code>"]
@@ -26,51 +26,51 @@ flowchart LR
 
   subgraph Artifacts["Run artifacts"]
     commit["Committed benchmark case<br/>data/corpus/...jsonl"]
-    dropSeed["Rejected artifact<br/>logs/.../rejections.jsonl"]
+    dropDesign["Rejected artifact<br/>logs/.../rejections.jsonl"]
     dropBatch["Dropped batch<br/><code>drop_retry_exhausted</code>"]
     stageLog["Stage Run Log<br/>logs/.../stage_records.jsonl"]
   end
 
-  START --> strategy
-  strategy -->|"seed batch recorded<br/>possibly empty"| planDet
-  strategy -.->|"every stage writes"| stageLog
+  START --> design
+  design -->|"design batch recorded<br/>possibly empty"| designDet
+  design -.->|"every stage writes"| stageLog
 
-  planDet -->|"accept"| selectSeed
-  planDet -->|"reject_coverage_mismatch<br/>reject_duplicate<br/>retry before max_plan_retries"| strategy
-  planDet -->|"drop_retry_exhausted"| dropBatch
+  designDet -->|"accept"| selectDesign
+  designDet -->|"reject_coverage_mismatch<br/>reject_duplicate<br/>retry before max_design_retries"| design
+  designDet -->|"drop_retry_exhausted"| dropBatch
 
-  selectSeed -->|"seed available"| auditSeed
-  selectSeed -->|"queue empty<br/>target not met"| strategy
+  selectDesign -->|"design available"| auditDesign
+  selectDesign -->|"queue empty<br/>target not met"| design
 
-  auditSeed -->|"accept"| generate
-  auditSeed -->|"reject_*"| dropSeed
+  auditDesign -->|"accept"| generate
+  auditDesign -->|"reject_*"| dropDesign
 
   generate -->|"accept"| validateDet
   generate -->|"retry_infra<br/>retry_parse<br/>retry_provider_empty<br/>retry before max_generation_retries"| generate
-  generate -->|"drop_retry_exhausted"| dropSeed
+  generate -->|"drop_retry_exhausted"| dropDesign
 
   validateDet -->|"accept"| qualityGate
   validateDet -->|"reject_schema<br/>reject_leakage<br/>reject_coverage_mismatch<br/>retry before max_generation_retries"| generate
-  validateDet -->|"drop_retry_exhausted"| dropSeed
+  validateDet -->|"drop_retry_exhausted"| dropDesign
 
   qualityGate -->|"accept"| rubricGate
   qualityGate -->|"reject_criteria_mismatch<br/>reject_semantic_mismatch<br/>retry before max_generation_retries"| generate
-  qualityGate -->|"drop_retry_exhausted"| dropSeed
+  qualityGate -->|"drop_retry_exhausted"| dropDesign
 
   rubricGate -->|"accept"| curate
   rubricGate -->|"reject_criteria_mismatch<br/>reject_semantic_mismatch<br/>retry before max_generation_retries"| generate
-  rubricGate -->|"drop_retry_exhausted"| dropSeed
+  rubricGate -->|"drop_retry_exhausted"| dropDesign
 
   curate -->|"accept"| commit
-  curate -->|"reject_duplicate"| dropSeed
+  curate -->|"reject_duplicate"| dropDesign
 
   commit -->|"target_n reached"| END
-  commit -->|"more seeds queued"| selectSeed
-  commit -->|"queue empty<br/>target not met"| strategy
+  commit -->|"more designs queued"| selectDesign
+  commit -->|"queue empty<br/>target not met"| design
 
-  dropSeed -->|"more seeds queued"| selectSeed
-  dropSeed -->|"queue empty<br/>plan retries remain"| strategy
-  dropSeed -->|"run ceiling reached"| END
+  dropDesign -->|"more designs queued"| selectDesign
+  dropDesign -->|"queue empty<br/>design retries remain"| design
+  dropDesign -->|"run ceiling reached"| END
   dropBatch --> END
 
   stageLog -.->|"offline metrics"| END
@@ -83,20 +83,20 @@ flowchart LR
   classDef reject fill:#fff1f2,stroke:#e11d48,color:#0f172a,stroke-width:2px;
 
   class START,END startEnd;
-  class strategy,auditSeed,generate,qualityGate,rubricGate llm;
-  class planDet,validateDet,curate det;
-  class selectSeed router;
+  class design,auditDesign,generate,qualityGate,rubricGate llm;
+  class designDet,validateDet,curate det;
+  class selectDesign router;
   class commit,stageLog artifact;
-  class dropSeed,dropBatch reject;
+  class dropDesign,dropBatch reject;
 ```
 
 ## Route Summary
 
 | Boundary | Accept route | Reject or retry route | Terminal route |
 |---|---|---|---|
-| Strategy to batch plan check | Seed batch, including an empty batch, flows to `validate_seed_plan_det` | `strategy` records `retry_provider_empty` if no seeds are returned, but current graph routing still continues through the batch check and queue cursor | No direct terminal route from `strategy` in the compiled graph |
-| Batch plan check to seed loop | `accept` to `select_next_seed` | `reject_coverage_mismatch` or `reject_duplicate` returns to `strategy` while retries remain | `drop_retry_exhausted` |
-| Seed plan audit to generation | `accept` to `generate` | Rejected seed is archived, then the run selects the next seed or replans | End only if no route can continue |
+| Design to batch design check | Design batch, including an empty batch, flows to `validate_design_batch_det` | `design` records `retry_provider_empty` if no designs are returned, but current graph routing still continues through the batch check and queue cursor | No direct terminal route from `design` in the compiled graph |
+| Batch design check to design loop | `accept` to `select_next_design` | `reject_coverage_mismatch` or `reject_duplicate` returns to `design` while retries remain | `drop_retry_exhausted` |
+| Design audit to generation | `accept` to `generate` | Rejected design is archived, then the run selects the next design or replans | End only if no route can continue |
 | Generation to validation | `accept` to `validate_det` | `retry_infra`, `retry_parse`, or `retry_provider_empty` loops on `generate` with `same_input_retry` while retries remain | `drop_retry_exhausted` |
 | Deterministic validation to quality gate | `accept` to `quality_gate` | Content failures route back to `generate` with `criteria_plus_route_code` while retries remain | `drop_retry_exhausted` |
 | Quality gate to rubric gate | `accept` to `rubric_gate` | Proxy-quality failures route back to `generate` with `criteria_plus_route_code` while retries remain | `drop_retry_exhausted` |
