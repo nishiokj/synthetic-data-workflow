@@ -1,5 +1,4 @@
 domain_id: benchmark_haiku
-dataset_version: poc-2
 
 case_types:
   - proxy_strong
@@ -45,8 +44,6 @@ route_codes:
   - retry_parse
   - retry_provider_empty
   - drop_retry_exhausted
-  - drop_timeout
-  - drop_policy_ceiling
 
 subcodes:
   - proxy_strong
@@ -68,22 +65,6 @@ subcodes:
   - duplicate_design
   - near_duplicate
   - provider_error
-
-reason_codes:
-  - proxy_strong
-  - weak_proxy_validity
-  - unreliable_score
-  - weak_diagnostic_pressure
-  - shortcut_leakage
-  - vague_scoring_contract
-  - fake_difficulty
-  - irrelevant_environment
-  - ambiguous_success_criteria
-  - overbroad_proxy_claim
-  - missing_known_limits
-  - missing_negative_control
-  - schema_violation
-  - near_duplicate
 
 novelty_threshold: 0.08
 max_design_retries: 2

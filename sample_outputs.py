@@ -9,6 +9,7 @@ from typing import Any
 from agents import OpenAIClient, ProviderError
 from config import ModelConfig, load_env_file
 from models import stable_hash, utc_now_iso
+from services.virtual_workspace import VirtualWorkspace
 
 
 def main() -> int:
@@ -50,7 +51,7 @@ def main() -> int:
         candidate = item.get("candidate", {})
         prompt = _prompt(candidate)
         if not prompt:
-            print(f"row {row_index}: missing candidate.benchmark_case.prompt", file=sys.stderr)
+            print(f"row {row_index}: missing candidate.agent_artifact.benchmark_case.prompt", file=sys.stderr)
             continue
         system = (
             "You are the model being evaluated by a benchmark. "
@@ -102,8 +103,55 @@ def _select_rows(rows: list[dict[str, Any]], *, index: int | None, limit: int) -
 
 
 def _prompt(candidate: dict[str, Any]) -> str:
-    benchmark_case = candidate.get("benchmark_case") if isinstance(candidate.get("benchmark_case"), dict) else {}
-    return str(benchmark_case.get("prompt") or "")
+    agent_artifact = candidate.get("agent_artifact") if isinstance(candidate.get("agent_artifact"), dict) else {}
+    benchmark_case = agent_artifact.get("benchmark_case") if isinstance(agent_artifact.get("benchmark_case"), dict) else {}
+    if not benchmark_case:
+        benchmark_case = candidate.get("benchmark_case") if isinstance(candidate.get("benchmark_case"), dict) else {}
+    prompt = str(benchmark_case.get("prompt") or "")
+    artifact = agent_artifact.get("environment_artifact")
+    if artifact is None:
+        artifact = candidate.get("environment_artifact")
+    workspace_payload = None
+    if isinstance(artifact, dict) and artifact.get("kind") == "virtual_workspace":
+        workspace_payload = artifact.get("payload")
+    if not isinstance(workspace_payload, dict):
+        return prompt
+
+    sections: list[str] = []
+    setup = benchmark_case.get("setup")
+    if isinstance(setup, str) and setup.strip():
+        sections.append("SETUP\n" + setup.strip())
+
+    workspace = VirtualWorkspace.from_payload(workspace_payload)
+    if workspace.commands:
+        sections.append("COMMANDS\n" + json.dumps(workspace.commands, indent=2, sort_keys=True))
+    file_sections = ["REPOSITORY FILES"]
+    for path in workspace.list_files():
+        content = workspace.read_file(path)
+        file_sections.append(f"--- {path} ---\n```{_language_for_path(path)}\n{content.rstrip()}\n```")
+    sections.append("\n\n".join(file_sections))
+
+    if prompt:
+        sections.append("BENCHMARK PROMPT\n" + prompt)
+    return "\n\n".join(sections)
+
+
+def _language_for_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    return {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
+        ".json": "json",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".md": "markdown",
+        ".toml": "toml",
+        ".sql": "sql",
+        ".sh": "bash",
+    }.get(suffix, "")
 
 
 def _append_jsonl(path: Path, value: dict[str, Any]) -> None:

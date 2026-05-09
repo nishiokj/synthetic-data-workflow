@@ -74,30 +74,32 @@ def _candidate(design: DesignBrief) -> CandidateSample:
         design_id=design.id,
         content_hash="abc",
         cell=design.cell,
-        benchmark_case={"prompt": "Debug the reconciliation worker and explain the invariant-preserving fix."},
-        score_x={
-            "score_type": "hard_checks_plus_rubric",
-            "dimensions": [
-                {
-                    "name": "causal_fix",
-                    "weight": 1.0,
-                    "high_score_criterion": "Identifies the upstream normalization cause and preserves period invariants.",
-                    "low_score_criterion": "Patches only the displayed summary or visible assertion.",
-                }
-            ],
+        agent_artifact={"benchmark_case": {"prompt": "Debug the reconciliation worker and explain the invariant-preserving fix."}},
+        judge_artifact={
+            "score_x": {
+                "score_type": "hard_checks_plus_rubric",
+                "dimensions": [
+                    {
+                        "name": "causal_fix",
+                        "weight": 1.0,
+                        "high_score_criterion": "Identifies the upstream normalization cause and preserves period invariants.",
+                        "low_score_criterion": "Patches only the displayed summary or visible assertion.",
+                    }
+                ],
+            },
+            "proxy_claim": "A strong score indicates debugging ability because the candidate must connect a misleading downstream symptom to upstream state normalization while preserving an invariant.",
+            "diagnostic_pressure": ["misleading downstream symptom", "upstream state invariant"],
+            "scoring_contract": {
+                "credit": ["causal fix preserves invariant"],
+                "penalties": ["formatter-only patch"],
+            },
+            "leakage_risks": ["Visible symptom may encourage formatter masking."],
+            "known_limits": ["Single case does not prove broad debugging skill."],
+            "coverage_tags": ["stateful_debugging"],
+            "negative_controls": [{"output": "Round the summary total.", "should_fail_because": "Masks the symptom without fixing the cause."}],
         },
         ability_z={"name": "fault_localization"},
         environment_y={"name": "single_turn_debug_with_test"},
-        proxy_claim="A strong score indicates debugging ability because the candidate must connect a misleading downstream symptom to upstream state normalization while preserving an invariant.",
-        diagnostic_pressure=["misleading downstream symptom", "upstream state invariant"],
-        scoring_contract={
-            "credit": ["causal fix preserves invariant"],
-            "penalties": ["formatter-only patch"],
-        },
-        leakage_risks=["Visible symptom may encourage formatter masking."],
-        known_limits=["Single case does not prove broad debugging skill."],
-        coverage_tags=["stateful_debugging"],
-        negative_controls=[{"output": "Round the summary total.", "should_fail_because": "Masks the symptom without fixing the cause."}],
         difficulty=design.cell.difficulty,
         case_type=design.cell.case_type,
     )

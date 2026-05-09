@@ -47,42 +47,55 @@ class FakeOpenAIClient:
                 "verdict": "accept",
                 "route_code": "accept",
                 "subcodes": [],
-                "reason_codes": [],
                 "evidence": [],
                 "rationale": "The design matches the allowed taxonomy and describes a concrete benchmark pressure.",
             }, meta
+        if "REVISION MODE" in system:
+            return {
+                "benchmark_case_updates": {
+                    "prompt": "Write a haiku that evokes a layoff as late autumn without saying work, loss, leaves, cold, endings, empty, office, or silence."
+                },
+                "metadata_updates": {
+                    "proxy_claim": "A model that succeeds here must preserve emotional transfer while avoiding both the source-domain vocabulary and the easiest seasonal-template vocabulary."
+                },
+                "environment_ops": [],
+                "revision_rationale": "Tighten the lexical trap after the adversary found obvious template paths.",
+            }, meta
         if "Benchmark Case Generator" in system:
             return {
-                "benchmark_case": {
-                    "prompt": "Write a haiku that evokes a layoff as late autumn without saying work, loss, leaves, cold, or endings.",
-                    "setup": "Single-turn creative-writing benchmark.",
-                    "inputs": {},
-                    "environment": {},
+                "agent_artifact": {
+                    "benchmark_case": {
+                        "prompt": "Write a haiku that evokes a layoff as late autumn without saying work, loss, leaves, cold, or endings.",
+                        "setup": "Single-turn creative-writing benchmark.",
+                        "inputs": {},
+                        "environment": {},
+                    },
                 },
-                "score_x": {
-                    "score_type": "hard_checks_plus_rubric",
-                    "range": [0, 1],
-                    "dimensions": [{"name": "constraint_adherence", "weight": 0.4, "high_score_criterion": "Output contains none of the forbidden terms and uses indirect imagery.", "low_score_criterion": "Output uses one or more forbidden terms directly."}],
+                "judge_artifact": {
+                    "score_x": {
+                        "score_type": "hard_checks_plus_rubric",
+                        "range": [0, 1],
+                        "dimensions": [{"name": "constraint_adherence", "weight": 0.4, "high_score_criterion": "Output contains none of the forbidden terms and uses indirect imagery.", "low_score_criterion": "Output uses one or more forbidden terms directly."}],
+                    },
+                    "proxy_claim": "A model that succeeds here is showing more than haiku formatting because it must preserve emotional intent while avoiding obvious lexical shortcuts and template seasonal imagery.",
+                    "diagnostic_pressure": ["forbids obvious imagery", "requires emotional transfer"],
+                    "scoring_contract": {
+                        "credit": ["preserves emotional intent", "obeys forbidden-word constraints"],
+                        "penalties": ["generic seasonal template", "mentions the source domain directly"],
+                        "uncertainty_policy": "Mark uncertainty when taste and constraint adherence conflict.",
+                    },
+                    "leakage_risks": ["A compliant but lifeless template may receive too much credit."],
+                    "known_limits": ["The case does not prove broad poetic taste."],
+                    "coverage_tags": ["anti_template", "emotional_transfer"],
+                    "negative_controls": [{"output": "dead leaves fall at work", "should_fail_because": "uses forbidden imagery and source domain"}],
                 },
                 "ability_z": {"name": "constrained_poetic_generation", "sub_abilities": ["metaphorical_transfer"]},
                 "environment_y": {"name": "single_turn_creative_writing", "assumptions": ["No tools"]},
-                "proxy_claim": "A model that succeeds here is showing more than haiku formatting because it must preserve emotional intent while avoiding obvious lexical shortcuts and template seasonal imagery.",
-                "diagnostic_pressure": ["forbids obvious imagery", "requires emotional transfer"],
-                "scoring_contract": {
-                    "credit": ["preserves emotional intent", "obeys forbidden-word constraints"],
-                    "penalties": ["generic seasonal template", "mentions the source domain directly"],
-                    "uncertainty_policy": "Mark uncertainty when taste and constraint adherence conflict.",
-                },
-                "leakage_risks": ["A compliant but lifeless template may receive too much credit."],
-                "known_limits": ["The case does not prove broad poetic taste."],
-                "coverage_tags": ["anti_template", "emotional_transfer"],
-                "negative_controls": [{"output": "dead leaves fall at work", "should_fail_because": "uses forbidden imagery and source domain"}],
             }, meta
         return {
             "verdict": "accept",
             "route_code": "accept",
             "subcodes": [],
-            "reason_codes": [],
             "evidence": [],
             "rationale": "The candidate is sufficient for this fake smoke test.",
         }, meta
@@ -133,6 +146,9 @@ def test_pipeline_smoke_uses_fenced_fake_provider(tmp_path, monkeypatch) -> None
         "benchmark_contract",
         "benchmark_oracle",
     ]
-    assert committed["candidate"]["output"]["benchmark_case"]["prompt"]
+    assert "output" not in committed["candidate"]
+    assert committed["candidate"]["agent_artifact"]["benchmark_case"]["prompt"]
+    assert "score_x" not in committed["candidate"]
+    assert committed["candidate"]["judge_artifact"]["score_x"]["score_type"] == "hard_checks_plus_rubric"
     assert [check["check_kind"] for check in committed["semantic_checks"]] == ["quality", "rubric"]
     assert all(check["rationale"] for check in committed["semantic_checks"])

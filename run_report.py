@@ -37,7 +37,6 @@ def main() -> int:
         print(f"time={first} -> {last}")
     print()
 
-    _print_schema_warning(stages, rejections, accepted)
     _print_counts("Routes", Counter(stage.get("route_code") for stage in stages))
     _print_counts("Validation rejection codes", _code_counts(stage for stage in stages if stage.get("verdict") == "reject"))
 
@@ -63,7 +62,7 @@ def main() -> int:
         for item in rejections[-args.limit :]:
             artifact = item.get("artifact", {})
             route = item.get("route", {})
-            codes = route.get("reason_codes") or route.get("subcodes") or []
+            codes = route.get("subcodes", [])
             print(_candidate_summary(artifact, prefix="-", route=route.get("route_code"), codes=codes))
         print()
 
@@ -72,7 +71,7 @@ def main() -> int:
         print("--------")
         for stage in stages:
             ts = str(stage.get("wallclock_ts", "?")).replace("T", " ").split("+")[0]
-            codes = ",".join(stage.get("reason_codes") or stage.get("subcodes") or [])
+            codes = ",".join(stage.get("subcodes", []))
             suffix = f" codes={codes}" if codes else ""
             print(
                 f"{ts} {stage.get('stage_kind')} {stage.get('role')} "
@@ -107,29 +106,9 @@ def _print_counts(title: str, counts: Counter[Any]) -> None:
 def _code_counts(stages: Any) -> Counter[str]:
     counts: Counter[str] = Counter()
     for stage in stages:
-        for code in stage.get("reason_codes") or stage.get("subcodes") or []:
+        for code in stage.get("subcodes", []):
             counts[str(code)] += 1
     return counts
-
-
-def _print_schema_warning(stages: list[dict[str, Any]], rejections: list[dict[str, Any]], accepted: list[dict[str, Any]]) -> None:
-    versions = set()
-    for item in accepted:
-        versions.add(_artifact_schema(item.get("candidate", {})))
-    for item in rejections:
-        versions.add(_artifact_schema(item.get("artifact", {})))
-    versions.discard("unknown")
-    if len(versions) > 1:
-        print("Warning")
-        print("-------")
-        print(f"Run contains mixed artifact schemas: {', '.join(sorted(versions))}")
-        print("This usually means the same run id was reused across code versions.")
-        print()
-    elif stages and accepted and not any(_stage_is_current(stage) for stage in stages):
-        print("Warning")
-        print("-------")
-        print("Run appears to contain only legacy stage records.")
-        print()
 
 
 def _design_stories(
@@ -143,7 +122,7 @@ def _design_stories(
         artifact = rejection.get("artifact", {})
         if not isinstance(artifact, dict):
             continue
-        design_id = str(artifact.get("design_id") or _design_from_candidate_id(str(artifact.get("id", ""))) or "unknown-design")
+        design_id = str(artifact.get("design_id") or "unknown-design")
         story = stories.setdefault(design_id, {"design_id": design_id, "attempts": [], "accepted": []})
         story["attempts"].append({"candidate": artifact, "route": rejection.get("route", {}), "accepted": False})
 
@@ -151,13 +130,13 @@ def _design_stories(
         candidate = item.get("candidate", {})
         if not isinstance(candidate, dict):
             continue
-        design_id = str(candidate.get("design_id") or _design_from_candidate_id(str(candidate.get("id", ""))) or "unknown-design")
+        design_id = str(candidate.get("design_id") or "unknown-design")
         story = stories.setdefault(design_id, {"design_id": design_id, "attempts": [], "accepted": []})
         story["accepted"].append(candidate)
         story["attempts"].append(
             {
                 "candidate": candidate,
-                "route": {"route_code": "accept", "reason_codes": []},
+                "route": {"route_code": "accept", "subcodes": []},
                 "accepted": True,
                 "semantic_checks": item.get("semantic_checks", []),
             }
@@ -186,13 +165,13 @@ def _story_summary(story: dict[str, Any]) -> str:
     prompt = _prompt(first_candidate)
     if prompt:
         lines.append(f'  prompt="{_clip(prompt, 220)}"')
-    proxy = str(first_candidate.get("proxy_claim") or "")
+    proxy = _proxy_claim(first_candidate)
     if proxy:
         lines.append(f'  proxy="{_clip(proxy, 220)}"')
     for index, attempt in enumerate(attempts, start=1):
         route = attempt.get("route") or {}
         candidate = attempt.get("candidate") or {}
-        codes = route.get("reason_codes") or route.get("subcodes") or []
+        codes = route.get("subcodes", [])
         code_text = ",".join(str(code) for code in codes[:7]) or "-"
         attempt_no = _attempt_number(candidate, fallback=index)
         verdict = "accepted" if attempt.get("accepted") else "rejected"
@@ -228,15 +207,6 @@ def _attempt_number(candidate: dict[str, Any], fallback: int) -> int:
     return int(tail) if tail.isdigit() else fallback
 
 
-def _design_from_candidate_id(candidate_id: str) -> str | None:
-    marker = "-candidate-"
-    if marker not in candidate_id:
-        return None
-    rest = candidate_id.split(marker, 1)[1]
-    pieces = rest.rsplit("-", 1)
-    return pieces[0] if pieces else None
-
-
 def _candidate_summary(
     candidate: dict[str, Any],
     *,
@@ -248,7 +218,7 @@ def _candidate_summary(
     case_type = _case_type(candidate)
     ability = _name(candidate.get("ability_z")) or "?"
     prompt = _prompt(candidate)
-    proxy = str(candidate.get("proxy_claim") or "")
+    proxy = _proxy_claim(candidate)
     parts = [
         f"{prefix} {candidate_id}",
         f"case={case_type}",
@@ -273,7 +243,7 @@ def _semantic_check_lines(checks: Any) -> list[str]:
             continue
         kind = str(check.get("check_kind") or "gate")
         verdict = str(check.get("verdict") or "?")
-        codes = ",".join(str(code) for code in (check.get("reason_codes") or check.get("subcodes") or [])[:5]) or "-"
+        codes = ",".join(str(code) for code in check.get("subcodes", [])[:5]) or "-"
         rationale = _clip(str(check.get("rationale") or ""), 240)
         if rationale:
             lines.append(f"{kind}: {verdict} codes={codes} rationale=\"{rationale}\"")
@@ -287,50 +257,27 @@ def _name(value: Any) -> str | None:
 
 
 def _prompt(candidate: dict[str, Any]) -> str:
+    artifact = candidate.get("agent_artifact")
+    if isinstance(artifact, dict):
+        case = artifact.get("benchmark_case")
+        if isinstance(case, dict):
+            return str(case.get("prompt") or "")
     case = candidate.get("benchmark_case")
     if isinstance(case, dict):
         return str(case.get("prompt") or "")
-    inner = candidate.get("inner_input")
-    if isinstance(inner, dict):
-        return str(inner.get("question") or "")
     return ""
+
+
+def _proxy_claim(candidate: dict[str, Any]) -> str:
+    artifact = candidate.get("judge_artifact")
+    if isinstance(artifact, dict):
+        return str(artifact.get("proxy_claim") or "")
+    return str(candidate.get("proxy_claim") or "")
 
 
 def _case_type(candidate: dict[str, Any]) -> str:
     cell = candidate.get("cell") if isinstance(candidate.get("cell"), dict) else {}
-    return str(candidate.get("case_type") or cell.get("case_type") or cell.get("failure_mode") or "?")
-
-
-def _artifact_schema(candidate: dict[str, Any]) -> str:
-    if not isinstance(candidate, dict):
-        return "unknown"
-    if "benchmark_case" in candidate:
-        return "benchmark"
-    if "inner_input" in candidate:
-        return "validator_legacy"
-    return "unknown"
-
-
-def _stage_is_current(stage: dict[str, Any]) -> bool:
-    current_roles = {
-        "design_batch",
-        "validate_design_batch_deterministically",
-        "audit_design",
-        "generate_candidate_sample",
-        "adversary_attack_report",
-        "quality_gate_candidate",
-        "rubric_gate_candidate",
-        "curate_committed_sample",
-    }
-    current_agents = {
-        "designer",
-        "design_auditor",
-        "sample_generator",
-        "adversary",
-        "quality_gate",
-        "rubric_gate",
-    }
-    return str(stage.get("role")) in current_roles or str(stage.get("agent_role")) in current_agents
+    return str(candidate.get("case_type") or cell.get("case_type") or "?")
 
 
 def _clip(value: str, limit: int) -> str:

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def utc_now_iso() -> str:
@@ -31,7 +31,6 @@ class AgentRole(str, Enum):
     DESIGN_AUDITOR = "design_auditor"
     SAMPLE_GENERATOR = "sample_generator"
     ADVERSARY = "adversary"
-    SEMANTIC_VALIDATOR = "semantic_validator"
     QUALITY_GATE = "quality_gate"
     RUBRIC_GATE = "rubric_gate"
 
@@ -54,15 +53,12 @@ class RouteCode(str, Enum):
     RETRY_PARSE = "retry_parse"
     RETRY_PROVIDER_EMPTY = "retry_provider_empty"
     DROP_RETRY_EXHAUSTED = "drop_retry_exhausted"
-    DROP_TIMEOUT = "drop_timeout"
-    DROP_POLICY_CEILING = "drop_policy_ceiling"
 
 
 class ContextPolicy(str, Enum):
     FRESH = "fresh"
     SAME_INPUT_RETRY = "same_input_retry"
     CRITERIA_ONLY = "criteria_only"
-    ROUTE_CODE_ONLY = "route_code_only"
     CRITERIA_PLUS_ROUTE_CODE = "criteria_plus_route_code"
 
 
@@ -89,15 +85,27 @@ class CheckResult(BaseModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
 
 
-class InnerInput(BaseModel):
-    question: str
-    claimed_answer: str
-    context: Optional[str] = None
+class EnvironmentArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class InnerCriteria(BaseModel):
-    rules: list[str]
-    requires_context: bool = False
+class AgentArtifact(BaseModel):
+    benchmark_case: dict[str, Any]
+    environment_artifact: Optional[EnvironmentArtifact] = None
+
+
+class JudgeArtifact(BaseModel):
+    score_x: dict[str, Any]
+    proxy_claim: str
+    diagnostic_pressure: list[str] = Field(default_factory=list)
+    scoring_contract: dict[str, Any]
+    leakage_risks: list[str] = Field(default_factory=list)
+    known_limits: list[str] = Field(default_factory=list)
+    coverage_tags: list[str] = Field(default_factory=list)
+    negative_controls: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DesignBrief(BaseModel):
@@ -108,6 +116,7 @@ class DesignBrief(BaseModel):
     target_environment: str
     design_intent: str
     environment_premise: dict[str, Any] = Field(default_factory=dict)
+    environment_artifact_spec: dict[str, Any] = Field(default_factory=dict)
     failure_mode_family: str
     diagnostic_pressure: list[str] = Field(default_factory=list)
     why_weak_agents_fail: list[str] = Field(default_factory=list)
@@ -129,6 +138,7 @@ class DesignBrief(BaseModel):
         target_environment: str,
         design_intent: str,
         environment_premise: Optional[dict[str, Any]] = None,
+        environment_artifact_spec: Optional[dict[str, Any]] = None,
         failure_mode_family: str,
         diagnostic_pressure: list[str],
         why_weak_agents_fail: list[str],
@@ -147,6 +157,7 @@ class DesignBrief(BaseModel):
                 "target_environment": target_environment,
                 "design_intent": design_intent,
                 "environment_premise": environment_premise or {},
+                "environment_artifact_spec": environment_artifact_spec or {},
                 "failure_mode_family": failure_mode_family,
                 "diagnostic_pressure": diagnostic_pressure,
                 "why_weak_agents_fail": why_weak_agents_fail,
@@ -165,6 +176,7 @@ class DesignBrief(BaseModel):
             target_environment=target_environment,
             design_intent=design_intent,
             environment_premise=environment_premise or {},
+            environment_artifact_spec=environment_artifact_spec or {},
             failure_mode_family=failure_mode_family,
             diagnostic_pressure=diagnostic_pressure,
             why_weak_agents_fail=why_weak_agents_fail,
@@ -183,28 +195,22 @@ class DesignVerdict(BaseModel):
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)
-    reason_codes: list[str] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
     rationale: str = ""
 
 
 class CandidateSample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     design_id: str
     content_hash: str
     cell: TaxonomyCell
     output: dict[str, Any] = Field(default_factory=dict)
-    benchmark_case: dict[str, Any]
-    score_x: dict[str, Any]
+    agent_artifact: AgentArtifact
+    judge_artifact: JudgeArtifact
     ability_z: dict[str, Any]
     environment_y: dict[str, Any]
-    proxy_claim: str
-    diagnostic_pressure: list[str] = Field(default_factory=list)
-    scoring_contract: dict[str, Any]
-    leakage_risks: list[str] = Field(default_factory=list)
-    known_limits: list[str] = Field(default_factory=list)
-    coverage_tags: list[str] = Field(default_factory=list)
-    negative_controls: list[dict[str, Any]] = Field(default_factory=list)
     difficulty: int = Field(ge=1, le=5)
     case_type: str
     provenance: dict[str, str] = Field(default_factory=dict)
@@ -216,19 +222,13 @@ class CandidateSample(BaseModel):
         if self.case_type != self.cell.case_type:
             raise ValueError("case_type must match taxonomy cell case_type")
         if not self.output:
-            self.output = {
-                "benchmark_case": self.benchmark_case,
-                "score_x": self.score_x,
+            output = {
+                "agent_artifact": self.agent_artifact.model_dump(mode="json", exclude_none=True),
+                "judge_artifact": self.judge_artifact.model_dump(mode="json"),
                 "ability_z": self.ability_z,
                 "environment_y": self.environment_y,
-                "proxy_claim": self.proxy_claim,
-                "diagnostic_pressure": self.diagnostic_pressure,
-                "scoring_contract": self.scoring_contract,
-                "leakage_risks": self.leakage_risks,
-                "known_limits": self.known_limits,
-                "coverage_tags": self.coverage_tags,
-                "negative_controls": self.negative_controls,
             }
+            self.output = output
         return self
 
 
@@ -249,7 +249,6 @@ class SampleVerdict(BaseModel):
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)
-    reason_codes: list[str] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
     rationale: str = ""
 
@@ -281,7 +280,6 @@ class RoutingDecision(BaseModel):
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)
-    reason_codes: list[str] = Field(default_factory=list)
     next_stage: Optional[StageKind]
     context_policy: ContextPolicy
     retry_index: int
@@ -309,25 +307,8 @@ class StageRecord(BaseModel):
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)
-    reason_codes: list[str] = Field(default_factory=list)
     criteria_hash: str
     context_policy: ContextPolicy
     retry_index: int = 0
     attempt_of: Optional[str] = None
     wallclock_ts: str = Field(default_factory=utc_now_iso)
-
-
-class StageResult(BaseModel):
-    artifact: Any
-    verdict: Verdict
-    route_code: RouteCode
-    subcodes: list[str] = Field(default_factory=list)
-    reason_codes: list[str] = Field(default_factory=list)
-    evidence: list[EvidenceRef] = Field(default_factory=list)
-    model: str = "none"
-    provider: str = "local"
-    prompt_hash: str = ""
-    input_tokens: int = 0
-    output_tokens: int = 0
-    latency_ms: int = 0
-    cost_usd: float = 0.0

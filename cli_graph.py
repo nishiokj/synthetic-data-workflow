@@ -111,7 +111,6 @@ AGENT_ROLE_NAMES = {
     AgentRole.DESIGNER.value: "Designer",
     AgentRole.DESIGN_AUDITOR.value: "DesignAuditor",
     AgentRole.SAMPLE_GENERATOR.value: "SampleGenerator",
-    AgentRole.SEMANTIC_VALIDATOR.value: "SemanticValidator",
     AgentRole.QUALITY_GATE.value: "QualityGate",
     AgentRole.RUBRIC_GATE.value: "RubricGate",
 }
@@ -492,7 +491,7 @@ def _handle_result(
 
     agent = AGENT_ROLE_NAMES.get(str(data.get("agent_role") or ""), "local")
     artifact = _short_id(str(data.get("artifact_id", "-")))
-    codes = ",".join(str(code) for code in data.get("reason_codes", [])[:4])
+    codes = ",".join(str(code) for code in data.get("subcodes", [])[:4])
     suffix = f" codes={codes}" if codes else ""
     recent.append(f"{NODE_LABELS_FULL[node]} {verdict} route={route} agent={agent} artifact={artifact}{suffix}")
 

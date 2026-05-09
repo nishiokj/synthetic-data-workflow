@@ -297,7 +297,6 @@ class PipelineRunner:
             verdict=verdict,
             route_code=decision.route_code,
             subcodes=subcodes,
-            reason_codes=subcodes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=_local_meta(),
             retry_index=retry_index,
@@ -310,7 +309,6 @@ class PipelineRunner:
                 verdict=Verdict.REJECT,
                 route_code=rejected_route_code,
                 subcodes=rejected_subcodes,
-                reason_codes=rejected_subcodes,
                 next_stage=None,
                 context_policy=ContextPolicy.CRITERIA_ONLY,
                 retry_index=retry_index,
@@ -387,7 +385,6 @@ class PipelineRunner:
             retry_index=0,
             max_design_retries=self.config.domain.max_design_retries,
             subcodes=design_verdict.subcodes,
-            reason_codes=design_verdict.reason_codes,
         )
         self._record(
             stage_kind=StageKind.DESIGN_AUDIT,
@@ -398,7 +395,6 @@ class PipelineRunner:
             verdict=design_verdict.verdict,
             route_code=design_verdict.route_code,
             subcodes=design_verdict.subcodes,
-            reason_codes=design_verdict.reason_codes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=meta,
         )
@@ -436,7 +432,6 @@ class PipelineRunner:
                 retry_index=retry_index,
                 max_generation_retries=self.config.domain.max_generation_retries,
                 subcodes=["provider_error"],
-                reason_codes=["provider_error"],
             )
             self._record(
                 stage_kind=StageKind.GENERATION,
@@ -447,7 +442,6 @@ class PipelineRunner:
                 verdict=Verdict.REJECT,
                 route_code=decision.route_code,
                 subcodes=["provider_error"],
-                reason_codes=["provider_error"],
                 context_policy=_producer_context_policy(state.get("gen_retry_route_code")),
                 meta=_local_meta(error=str(exc)),
                 retry_index=retry_index,
@@ -514,7 +508,6 @@ class PipelineRunner:
             verdict=det_verdict.verdict,
             route_code=det_verdict.route_code,
             subcodes=det_verdict.subcodes,
-            reason_codes=det_verdict.reason_codes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=_local_meta(),
             retry_index=state["gen_attempt"],
@@ -530,7 +523,6 @@ class PipelineRunner:
             retry_index=state["gen_attempt"],
             max_generation_retries=self.config.domain.max_generation_retries,
             subcodes=det_verdict.subcodes,
-            reason_codes=det_verdict.reason_codes,
         )
         self.rejections.append(candidate, decision)
         self._progress(
@@ -538,7 +530,7 @@ class PipelineRunner:
             "rejected",
             **_candidate_progress(candidate),
             route=decision.route_code,
-            codes=decision.reason_codes or decision.subcodes,
+            codes=decision.subcodes,
         )
         update: PipelineState = {"det_checks": checks, "det_accepted": False, "last_decision": decision}
         if decision.terminal:
@@ -583,7 +575,6 @@ class PipelineRunner:
                 retry_index=state["gen_attempt"],
                 max_generation_retries=self.config.domain.max_generation_retries,
                 subcodes=["adversary_nuke"],
-                reason_codes=["adversary_nuke"],
             )
             self.rejections.append(candidate, decision)
             self._progress(
@@ -591,7 +582,7 @@ class PipelineRunner:
                 "rejected",
                 **_candidate_progress(candidate),
                 route=decision.route_code,
-                codes=decision.reason_codes or decision.subcodes,
+                codes=decision.subcodes,
             )
             update: PipelineState = {
                 "adversary_report": report,
@@ -639,7 +630,6 @@ class PipelineRunner:
                 retry_index=state["gen_attempt"],
                 max_generation_retries=self.config.domain.max_generation_retries,
                 subcodes=["provider_error"],
-                reason_codes=["provider_error"],
             )
             self._record(
                 stage_kind=StageKind.GENERATION,
@@ -650,7 +640,6 @@ class PipelineRunner:
                 verdict=Verdict.REJECT,
                 route_code=decision.route_code,
                 subcodes=["provider_error"],
-                reason_codes=["provider_error"],
                 context_policy=ContextPolicy.CRITERIA_PLUS_ROUTE_CODE,
                 meta=_local_meta(error=str(exc)),
                 retry_index=state["gen_attempt"],
@@ -732,7 +721,6 @@ class PipelineRunner:
             verdict=quality_verdict.verdict,
             route_code=quality_verdict.route_code,
             subcodes=quality_verdict.subcodes,
-            reason_codes=quality_verdict.reason_codes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=quality_meta,
             retry_index=state["gen_attempt"],
@@ -753,7 +741,6 @@ class PipelineRunner:
             verdict=rubric_verdict.verdict,
             route_code=rubric_verdict.route_code,
             subcodes=rubric_verdict.subcodes,
-            reason_codes=rubric_verdict.reason_codes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=rubric_meta,
             retry_index=state["gen_attempt"],
@@ -780,7 +767,6 @@ class PipelineRunner:
             retry_index=state["gen_attempt"],
             max_generation_retries=self.config.domain.max_generation_retries,
             subcodes=verdict.subcodes,
-            reason_codes=verdict.reason_codes,
         )
         update: PipelineState = {"last_decision": decision}
         if verdict.verdict == Verdict.REJECT:
@@ -790,7 +776,7 @@ class PipelineRunner:
                 "rejected",
                 **_candidate_progress(candidate),
                 route=decision.route_code,
-                codes=decision.reason_codes or decision.subcodes,
+                codes=decision.subcodes,
             )
             if decision.terminal:
                 update["dropped_count"] = state["dropped_count"] + 1
@@ -830,7 +816,6 @@ class PipelineRunner:
             verdict=cur_verdict.verdict,
             route_code=cur_verdict.route_code,
             subcodes=cur_verdict.subcodes,
-            reason_codes=cur_verdict.reason_codes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=cur_meta,
             retry_index=state["gen_attempt"],
@@ -842,7 +827,6 @@ class PipelineRunner:
             route_code=cur_verdict.route_code,
             retry_index=state["gen_attempt"],
             subcodes=cur_verdict.subcodes,
-            reason_codes=cur_verdict.reason_codes,
         )
         if committed:
             self.coverage.increment(candidate.cell)
@@ -851,7 +835,7 @@ class PipelineRunner:
                 "committed",
                 **_candidate_progress(candidate),
                 route=decision.route_code,
-                codes=cur_verdict.reason_codes or cur_verdict.subcodes,
+                codes=cur_verdict.subcodes,
             )
             return {
                 "committed_count": state["committed_count"] + 1,
@@ -868,7 +852,7 @@ class PipelineRunner:
             "rejected",
             **_candidate_progress(candidate),
             route=decision.route_code,
-            codes=decision.reason_codes or decision.subcodes,
+            codes=decision.subcodes,
         )
         return {
             "dropped_count": state["dropped_count"] + 1,
@@ -892,7 +876,6 @@ class PipelineRunner:
         context_policy: ContextPolicy,
         meta: dict[str, Any],
         subcodes: list[str] | None = None,
-        reason_codes: list[str] | None = None,
         retry_index: int = 0,
     ) -> None:
         record = StageRecord(
@@ -915,7 +898,6 @@ class PipelineRunner:
             verdict=verdict,
             route_code=route_code,
             subcodes=subcodes or [],
-            reason_codes=reason_codes or [],
             criteria_hash=stable_hash(self.config.domain.model_dump(mode="json")),
             context_policy=context_policy,
             retry_index=retry_index,
@@ -1006,13 +988,13 @@ def _short_id(value: str) -> str:
 
 def _candidate_progress(candidate: CandidateSample) -> dict[str, Any]:
     ability = candidate.ability_z.get("name") if isinstance(candidate.ability_z, dict) else None
-    prompt = candidate.benchmark_case.get("prompt") if isinstance(candidate.benchmark_case, dict) else None
+    prompt = candidate.agent_artifact.benchmark_case.get("prompt")
     return {
         "id": candidate.id,
         "case_type": candidate.case_type,
         "ability": ability,
         "prompt": prompt,
-        "proxy": candidate.proxy_claim,
+        "proxy": candidate.judge_artifact.proxy_claim,
     }
 
 
@@ -1022,7 +1004,6 @@ def _local_design_verdict(design: DesignBrief, route_code: RouteCode, subcodes: 
         verdict=Verdict.REJECT,
         route_code=route_code,
         subcodes=subcodes,
-        reason_codes=subcodes,
     )
 
 

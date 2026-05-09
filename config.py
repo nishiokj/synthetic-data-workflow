@@ -20,7 +20,6 @@ class ModelConfig(BaseModel):
 
 class DomainConfig(BaseModel):
     domain_id: str
-    dataset_version: str = "poc-1"
     case_types: list[str]
     difficulties: list[int]
     scenarios: list[str]
@@ -30,7 +29,6 @@ class DomainConfig(BaseModel):
     scoring_methods: list[str] = Field(default_factory=list)
     route_codes: list[str]
     subcodes: list[str]
-    reason_codes: list[str]
     novelty_threshold: float = 0.08
     max_design_retries: int = 2
     max_generation_retries: int = 2

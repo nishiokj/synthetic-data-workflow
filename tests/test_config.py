@@ -69,4 +69,5 @@ def test_domain_loads_output_schema_from_json_file() -> None:
     domain = load_domain("domains/benchmark_haiku.yaml")
 
     assert domain.output_schema["type"] == "object"
-    assert "benchmark_case" in domain.output_schema["required"]
+    assert "agent_artifact" in domain.output_schema["required"]
+    assert "judge_artifact" in domain.output_schema["required"]

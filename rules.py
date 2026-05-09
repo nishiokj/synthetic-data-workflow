@@ -14,6 +14,7 @@ from models import (
     SampleVerdict,
     Verdict,
 )
+from services.environment_validation import validate_environment_artifact
 from text_hygiene import find_disallowed_text
 
 
@@ -96,6 +97,9 @@ def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfi
         _benchmark_contract_check(candidate, domain),
         _benchmark_oracle_check(candidate, domain),
     ]
+    if domain.domain_id == "benchmark_code_debug":
+        checks.insert(3, validate_environment_artifact(candidate, domain))
+        checks.insert(4, _candidate_facing_answer_leak_check(candidate))
     failed = [check for check in checks if not check.passed]
     if not failed:
         return (
@@ -116,7 +120,6 @@ def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfi
             verdict=Verdict.REJECT,
             route_code=first.route_code,
             subcodes=[code for code in [first.subcode] if code],
-            reason_codes=[code for code in [first.subcode] if code],
             evidence=first.evidence,
         ),
         checks,
@@ -125,7 +128,7 @@ def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfi
 
 def _schema_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
     validator = Draft202012Validator(domain.benchmark_case_schema)
-    errors = sorted(validator.iter_errors(candidate.benchmark_case), key=lambda err: err.path)
+    errors = sorted(validator.iter_errors(candidate.agent_artifact.benchmark_case), key=lambda err: err.path)
     if errors:
         error = errors[0]
         return CheckResult(
@@ -177,6 +180,101 @@ def _text_hygiene_check(candidate: CandidateSample) -> CheckResult:
     )
 
 
+_ANSWER_LEAK_PATTERNS = (
+    "bug:",
+    "bug note",
+    "bug (intentional",
+    "bug intentionally",
+    "intentionally buggy",
+    "intentional bug",
+    "root cause",
+    "source of the bug",
+    "source of this bug",
+    "the intended fix",
+    "exact fix",
+    "faulty line",
+    "current code incorrectly",
+    "currently incorrectly",
+    "incorrectly only",
+    "should be keyed",
+    "should use",
+    "should update",
+    "should set",
+    "should invalidate",
+    "before the transaction commits",
+    "before tx.commit",
+    "before committing",
+    "before commit",
+    "after commit",
+    "causal chain",
+    "causal interleaving",
+    "hidden causal chain",
+    "intended invariant",
+    "intended correct",
+    "intended behavior",
+    "starter code",
+    "starter workspace",
+    "your fix should",
+    "the task for",
+    "acceptable solutions",
+    "naive fixes",
+    "shallow fixes",
+    "regression test to catch",
+    "detect naive",
+    "benchmark",
+)
+
+
+def _candidate_facing_answer_leak_check(candidate: CandidateSample) -> CheckResult:
+    for path, value in _candidate_facing_texts(candidate):
+        lowered = value.lower()
+        for pattern in _ANSWER_LEAK_PATTERNS:
+            if pattern in lowered:
+                return CheckResult(
+                    check_id="answer_leakage",
+                    passed=False,
+                    route_code=RouteCode.REJECT_LEAKAGE,
+                    subcode="answer_leak_in_candidate_materials",
+                    evidence=[
+                        EvidenceRef(
+                            source="deterministic_rule",
+                            path=path,
+                            value=f"candidate-facing text contains answer-leak marker: {pattern}",
+                        )
+                    ],
+                )
+    return CheckResult(check_id="answer_leakage", passed=True)
+
+
+def _candidate_facing_texts(candidate: CandidateSample) -> list[tuple[str, str]]:
+    texts: list[tuple[str, str]] = []
+    benchmark_case = candidate.agent_artifact.benchmark_case
+    for key in ("prompt", "setup"):
+        value = benchmark_case.get(key)
+        if isinstance(value, str):
+            texts.append((f"benchmark_case.{key}", value))
+    environment = benchmark_case.get("environment")
+    if isinstance(environment, dict):
+        for key, value in environment.items():
+            if isinstance(value, str):
+                texts.append((f"benchmark_case.environment.{key}", value))
+
+    artifact = candidate.agent_artifact.environment_artifact
+    if artifact is not None and artifact.kind == "virtual_workspace":
+        files = artifact.payload.get("files", [])
+        if isinstance(files, list):
+            for index, file_entry in enumerate(files):
+                if not isinstance(file_entry, dict):
+                    continue
+                file_path = file_entry.get("path")
+                content = file_entry.get("content")
+                if isinstance(file_path, str):
+                    texts.append((f"environment_artifact.payload.files.{index}.path", file_path))
+                if isinstance(content, str):
+                    texts.append((f"environment_artifact.payload.files.{index}.content", content))
+    return texts
+
+
 def _taxonomy_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
     if candidate.cell.case_type not in domain.case_types:
         return CheckResult(
@@ -196,24 +294,25 @@ def _taxonomy_check(candidate: CandidateSample, domain: DomainConfig) -> CheckRe
 
 
 def _benchmark_contract_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
-    if len(candidate.proxy_claim.strip()) < int(domain.deterministic_rules.get("min_proxy_claim_chars", 1)):
+    judge = candidate.judge_artifact
+    if len(judge.proxy_claim.strip()) < int(domain.deterministic_rules.get("min_proxy_claim_chars", 1)):
         return _failed_contract("weak_proxy_validity", "proxy_claim is missing or too short")
-    if len(candidate.diagnostic_pressure) < int(domain.deterministic_rules.get("min_diagnostic_pressure_items", 1)):
+    if len(judge.diagnostic_pressure) < int(domain.deterministic_rules.get("min_diagnostic_pressure_items", 1)):
         return _failed_contract("weak_diagnostic_pressure", "diagnostic_pressure has too few items")
-    if len(candidate.leakage_risks) < int(domain.deterministic_rules.get("min_leakage_risk_items", 0)):
+    if len(judge.leakage_risks) < int(domain.deterministic_rules.get("min_leakage_risk_items", 0)):
         return _failed_contract("shortcut_leakage", "leakage_risks is missing")
-    if len(candidate.known_limits) < int(domain.deterministic_rules.get("min_known_limit_items", 0)):
+    if len(judge.known_limits) < int(domain.deterministic_rules.get("min_known_limit_items", 0)):
         return _failed_contract("missing_known_limits", "known_limits is missing")
-    if bool(domain.deterministic_rules.get("require_negative_control", False)) and not candidate.negative_controls:
+    if bool(domain.deterministic_rules.get("require_negative_control", False)) and not judge.negative_controls:
         return _failed_contract("missing_negative_control", "negative_controls is required")
-    if not candidate.score_x.get("score_type"):
+    if not judge.score_x.get("score_type"):
         return _failed_contract("unreliable_score", "score_x.score_type is missing")
-    if not candidate.score_x.get("dimensions"):
+    if not judge.score_x.get("dimensions"):
         return _failed_contract("unreliable_score", "score_x.dimensions is missing")
-    for dim in candidate.score_x.get("dimensions", []):
+    for dim in judge.score_x.get("dimensions", []):
         if not dim.get("high_score_criterion") or not dim.get("low_score_criterion"):
             return _failed_contract("vague_scoring_contract", f"dimension '{dim.get('name', '?')}' is missing high_score_criterion or low_score_criterion")
-    if not candidate.scoring_contract.get("credit") or not candidate.scoring_contract.get("penalties"):
+    if not judge.scoring_contract.get("credit") or not judge.scoring_contract.get("penalties"):
         return _failed_contract("vague_scoring_contract", "scoring_contract needs credit and penalties")
     if not candidate.ability_z.get("name"):
         return _failed_contract("weak_proxy_validity", "ability_z.name is missing")
@@ -225,7 +324,7 @@ def _benchmark_contract_check(candidate: CandidateSample, domain: DomainConfig) 
 def _benchmark_oracle_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
     if not bool(domain.deterministic_rules.get("require_benchmark_oracle", False)):
         return CheckResult(check_id="benchmark_oracle", passed=True)
-    oracle = candidate.benchmark_case.get("oracle")
+    oracle = candidate.agent_artifact.benchmark_case.get("oracle")
     if not isinstance(oracle, dict):
         return _failed_oracle("benchmark_case.oracle is required")
     expected = oracle.get("expected_repair_characteristics")

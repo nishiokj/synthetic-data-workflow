@@ -43,10 +43,10 @@ def main() -> int:
         "case_type_distribution": dict(Counter(_cell(value).get("case_type") for value in committed)),
         "ability_distribution": dict(Counter(_name(candidate.get("ability_z")) for candidate in candidates)),
         "environment_distribution": dict(Counter(_name(candidate.get("environment_y")) for candidate in candidates)),
-        "scoring_method_distribution": dict(Counter((candidate.get("score_x") or {}).get("score_type") for candidate in candidates)),
-        "diagnostic_pressure_distribution": dict(Counter(tag for candidate in candidates for tag in candidate.get("diagnostic_pressure", []))),
-        "leakage_risk_count_distribution": dict(Counter(len(candidate.get("leakage_risks", [])) for candidate in candidates)),
-        "known_limit_count_distribution": dict(Counter(len(candidate.get("known_limits", [])) for candidate in candidates)),
+        "scoring_method_distribution": dict(Counter((_judge_artifact(candidate).get("score_x") or {}).get("score_type") for candidate in candidates)),
+        "diagnostic_pressure_distribution": dict(Counter(tag for candidate in candidates for tag in _judge_artifact(candidate).get("diagnostic_pressure", []))),
+        "leakage_risk_count_distribution": dict(Counter(len(_judge_artifact(candidate).get("leakage_risks", [])) for candidate in candidates)),
+        "known_limit_count_distribution": dict(Counter(len(_judge_artifact(candidate).get("known_limits", [])) for candidate in candidates)),
         "deterministic_pass_rate": _pass_rate(validations, "deterministic"),
         "quality_gate_pass_rate": _pass_rate(validations, "quality"),
         "rubric_gate_pass_rate": _pass_rate(validations, "rubric"),
@@ -93,6 +93,11 @@ def _cell(value: dict[str, Any]) -> dict[str, Any]:
 
 def _name(value: Any) -> str | None:
     return value.get("name") if isinstance(value, dict) else None
+
+
+def _judge_artifact(candidate: dict[str, Any]) -> dict[str, Any]:
+    artifact = candidate.get("judge_artifact")
+    return artifact if isinstance(artifact, dict) else candidate
 
 
 def _entropy(counts: Counter[str]) -> float:

@@ -6,6 +6,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from typing import Any
 
 from config import DomainConfig, ModelConfig
@@ -21,6 +22,7 @@ from models import (
     Verdict,
     stable_hash,
 )
+from services.virtual_workspace import VirtualWorkspace, VirtualWorkspaceError
 from text_hygiene import normalize_text_tree
 
 
@@ -213,6 +215,12 @@ class Designer:
                             "actual_causal_region": "where the real cause should live",
                             "required_depth": "why resolving it requires nontrivial reasoning",
                         },
+                        "environment_artifact_spec": {
+                            "kind": "virtual_workspace or another environment primitive, when the design needs a bounded artifact environment",
+                            "required_capabilities": ["materialized artifacts needed by the eventual evaluated entity"],
+                            "execution_expectation": "how a deterministic environment check should behave, if applicable",
+                            "forbidden_environment_shortcuts": ["environment shapes that would make the benchmark too easy or leaky"],
+                        },
                         "failure_mode_family": "class of failure the benchmark should instantiate",
                         "diagnostic_pressure": ["specific pressures this case should apply"],
                         "why_weak_agents_fail": ["why weaker evaluated agents should fail"],
@@ -247,6 +255,7 @@ class Designer:
                     target_environment=str(raw["target_environment"]),
                     design_intent=str(raw["design_intent"]),
                     environment_premise=raw["environment_premise"] if isinstance(raw.get("environment_premise"), dict) else {},
+                    environment_artifact_spec=raw["environment_artifact_spec"] if isinstance(raw.get("environment_artifact_spec"), dict) else {},
                     failure_mode_family=str(raw["failure_mode_family"]),
                     diagnostic_pressure=_string_list(raw.get("diagnostic_pressure", [])),
                     why_weak_agents_fail=_string_list(raw.get("why_weak_agents_fail", [])),
@@ -314,7 +323,6 @@ class DesignAuditor:
                     "verdict": "accept or reject",
                     "route_code": "accept or a reject route code",
                     "subcodes": ["descriptive labels only"],
-                    "reason_codes": ["descriptive labels only"],
                     "evidence": [{"source": "criteria", "path": "field", "value": "short quote"}],
                     "rationale": "2-5 sentence public justification for the verdict, citing concrete evidence; no hidden chain-of-thought",
                 },
@@ -329,7 +337,6 @@ class DesignAuditor:
             verdict=verdict,
             route_code=route_code,
             subcodes=list(payload.get("subcodes", [])),
-            reason_codes=list(payload.get("reason_codes", [])),
             evidence=_evidence(payload.get("evidence", [])),
             rationale=str(payload.get("rationale", "")),
         )
@@ -470,6 +477,217 @@ def _string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+_REVISION_PATCH_KEYS = {"benchmark_case_updates", "metadata_updates", "environment_ops", "revision_rationale"}
+_BENCHMARK_CASE_UPDATE_KEYS = {"prompt", "setup", "inputs", "environment"}
+_METADATA_UPDATE_KEYS = {
+    "score_x",
+    "proxy_claim",
+    "diagnostic_pressure",
+    "scoring_contract",
+    "leakage_risks",
+    "known_limits",
+    "coverage_tags",
+    "negative_controls",
+}
+
+
+def _agent_artifact_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    agent_artifact = payload.get("agent_artifact")
+    if not isinstance(agent_artifact, dict):
+        raise ProviderError("generator output must include agent_artifact object")
+    normalized = {
+        "benchmark_case": dict(agent_artifact.get("benchmark_case", {})),
+    }
+    if agent_artifact.get("environment_artifact") is not None:
+        normalized["environment_artifact"] = agent_artifact.get("environment_artifact")
+    return normalized
+
+
+def _judge_artifact_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    judge_artifact = payload.get("judge_artifact")
+    if not isinstance(judge_artifact, dict):
+        raise ProviderError("generator output must include judge_artifact object")
+    return {
+        "score_x": dict(judge_artifact.get("score_x", {})),
+        "proxy_claim": str(judge_artifact.get("proxy_claim", "")),
+        "diagnostic_pressure": list(judge_artifact.get("diagnostic_pressure", [])),
+        "scoring_contract": dict(judge_artifact.get("scoring_contract", {})),
+        "leakage_risks": list(judge_artifact.get("leakage_risks", [])),
+        "known_limits": list(judge_artifact.get("known_limits", [])),
+        "coverage_tags": list(judge_artifact.get("coverage_tags", [])),
+        "negative_controls": list(judge_artifact.get("negative_controls", [])),
+    }
+
+
+def _revision_patch_shape(domain: DomainConfig) -> dict[str, Any]:
+    shape: dict[str, Any] = {
+        "benchmark_case_updates": {
+            "prompt": "optional complete replacement prompt",
+            "setup": "optional complete replacement setup",
+            "inputs": "optional complete replacement inputs object",
+            "environment": "optional complete replacement environment object",
+        },
+        "metadata_updates": {
+            "score_x": "optional complete replacement scoring object",
+            "proxy_claim": "optional complete replacement proxy claim",
+            "diagnostic_pressure": "optional complete replacement list",
+            "scoring_contract": "optional complete replacement scoring contract",
+            "leakage_risks": "optional complete replacement list",
+            "known_limits": "optional complete replacement list",
+            "coverage_tags": "optional complete replacement list",
+            "negative_controls": "optional complete replacement list",
+        },
+        "environment_ops": [],
+        "revision_rationale": "short private rationale for the patch",
+    }
+    if domain.domain_id == "benchmark_code_debug":
+        shape["environment_ops"] = [
+            {"op": "write_file", "path": "relative/path.py", "content": "complete replacement file contents"},
+            {"op": "delete_file", "path": "obsolete/relative/path.py"},
+        ]
+    return shape
+
+
+def _apply_revision_patch(candidate: CandidateSample, patch: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(patch, dict):
+        raise ProviderError("revision patch must be a JSON object")
+    unknown_keys = set(patch) - _REVISION_PATCH_KEYS
+    if unknown_keys:
+        raise ProviderError(f"revision patch contains unsupported top-level keys: {sorted(unknown_keys)}")
+
+    benchmark_case = deepcopy(candidate.agent_artifact.benchmark_case)
+    metadata: dict[str, Any] = {
+        "score_x": deepcopy(candidate.judge_artifact.score_x),
+        "ability_z": deepcopy(candidate.ability_z),
+        "environment_y": deepcopy(candidate.environment_y),
+        "proxy_claim": candidate.judge_artifact.proxy_claim,
+        "diagnostic_pressure": list(candidate.judge_artifact.diagnostic_pressure),
+        "scoring_contract": deepcopy(candidate.judge_artifact.scoring_contract),
+        "leakage_risks": list(candidate.judge_artifact.leakage_risks),
+        "known_limits": list(candidate.judge_artifact.known_limits),
+        "coverage_tags": list(candidate.judge_artifact.coverage_tags),
+        "negative_controls": deepcopy(candidate.judge_artifact.negative_controls),
+    }
+    environment_artifact = (
+        candidate.agent_artifact.environment_artifact.model_dump(mode="json")
+        if candidate.agent_artifact.environment_artifact is not None
+        else None
+    )
+
+    changed = False
+    benchmark_updates = patch.get("benchmark_case_updates", {})
+    if benchmark_updates is None:
+        benchmark_updates = {}
+    if not isinstance(benchmark_updates, dict):
+        raise ProviderError("revision patch benchmark_case_updates must be an object")
+    unknown_benchmark_keys = set(benchmark_updates) - _BENCHMARK_CASE_UPDATE_KEYS
+    if unknown_benchmark_keys:
+        raise ProviderError(f"revision patch contains unsupported benchmark_case_updates keys: {sorted(unknown_benchmark_keys)}")
+    for key, value in benchmark_updates.items():
+        benchmark_case[key] = value
+        changed = True
+
+    metadata_updates = patch.get("metadata_updates", {})
+    if metadata_updates is None:
+        metadata_updates = {}
+    if not isinstance(metadata_updates, dict):
+        raise ProviderError("revision patch metadata_updates must be an object")
+    unknown_metadata_keys = set(metadata_updates) - _METADATA_UPDATE_KEYS
+    if unknown_metadata_keys:
+        raise ProviderError(f"revision patch contains unsupported metadata_updates keys: {sorted(unknown_metadata_keys)}")
+    for key, value in metadata_updates.items():
+        metadata[key] = value
+        changed = True
+
+    environment_ops = patch.get("environment_ops", [])
+    if environment_ops is None:
+        environment_ops = []
+    if not isinstance(environment_ops, list):
+        raise ProviderError("revision patch environment_ops must be a list")
+    if environment_ops:
+        if not environment_artifact or environment_artifact.get("kind") != "virtual_workspace":
+            raise ProviderError("revision patch environment_ops require a virtual_workspace environment_artifact")
+        try:
+            workspace = VirtualWorkspace.from_payload(environment_artifact.get("payload", {}))
+            for index, op in enumerate(environment_ops):
+                if not isinstance(op, dict):
+                    raise ProviderError(f"revision patch environment_ops.{index} must be an object")
+                op_name = op.get("op")
+                path = op.get("path")
+                if op_name == "write_file":
+                    workspace.write_file(path, op.get("content"))
+                elif op_name == "delete_file":
+                    workspace.delete_file(path)
+                else:
+                    raise ProviderError(f"revision patch environment_ops.{index}.op is unsupported: {op_name!r}")
+            environment_artifact["payload"] = workspace.to_payload()
+        except VirtualWorkspaceError as exc:
+            raise ProviderError(f"revision patch virtual workspace error: {exc.subcode} at {exc.path}: {exc.message}") from exc
+        changed = True
+
+    if not changed:
+        raise ProviderError("revision patch made no candidate changes")
+
+    return {
+        "benchmark_case": benchmark_case,
+        "environment_artifact": environment_artifact,
+        **metadata,
+    }
+
+
+def _example_output_for_domain(domain: DomainConfig) -> dict[str, Any]:
+    agent_artifact: dict[str, Any] = {
+        "benchmark_case": {
+            "prompt": "agent-facing task prompt string",
+            "setup": "optional agent-facing setup",
+            "inputs": {},
+            "environment": {},
+        }
+    }
+    if domain.domain_id == "benchmark_code_debug":
+        agent_artifact["environment_artifact"] = {
+            "kind": "virtual_workspace",
+            "payload": {
+                "files": [
+                    {"path": "relative/path.py", "content": "complete file contents shown to the evaluated agent"},
+                    {"path": "tests/test_behavior.py", "content": "complete visible test or harness contents"},
+                    {"path": "README.md", "content": "complete supporting project instructions"},
+                ],
+                "commands": {"test": "python -m pytest -q"},
+            },
+        }
+    return {
+        "agent_artifact": agent_artifact,
+        "judge_artifact": {
+            "score_x": {
+                "score_type": "one allowed scoring method",
+                "range": [0, 1],
+                "dimensions": [
+                    {
+                        "name": "dimension name",
+                        "weight": 0.5,
+                        "high_score_criterion": "judge-facing behavior that earns full credit",
+                        "low_score_criterion": "judge-facing behavior that earns zero credit",
+                    }
+                ],
+            },
+            "proxy_claim": "judge-facing claim for why score_x should indicate ability_z in environment_y",
+            "diagnostic_pressure": ["judge-facing pressure exerted by this case"],
+            "scoring_contract": {
+                "credit": ["observable behavior that earns credit"],
+                "penalties": ["shallow or bad behavior that loses credit"],
+                "uncertainty_policy": "when judges should mark uncertainty",
+            },
+            "leakage_risks": ["how the case or scorer can be gamed"],
+            "known_limits": ["what this benchmark case does not prove"],
+            "coverage_tags": ["short coverage tags"],
+            "negative_controls": [{"output": "known-bad agent output", "should_fail_because": "why score_x should penalize it"}],
+        },
+        "ability_z": {"name": "target ability", "sub_abilities": ["specific sub-ability"]},
+        "environment_y": {"name": "target environment", "assumptions": ["assumption"]},
+    }
+
+
 class SampleGenerator:
     role_name = "SampleGenerator"
 
@@ -505,34 +723,7 @@ class SampleGenerator:
                 "scoring_methods": self.domain.scoring_methods,
             },
             "required_json_schema": self.domain.output_schema,
-            "fallback_required_json_shape": {
-                "benchmark_case": {"prompt": "benchmark prompt string", "setup": "optional setup", "inputs": {}, "environment": {}},
-                "score_x": {
-                    "score_type": "one allowed scoring method",
-                    "range": [0, 1],
-                    "dimensions": [
-                        {
-                            "name": "dimension name",
-                            "weight": 0.5,
-                            "high_score_criterion": "concrete observable behavior in the agent output that earns full credit",
-                            "low_score_criterion": "concrete observable behavior in the agent output that earns zero credit",
-                        }
-                    ],
-                },
-                "ability_z": {"name": "target ability", "sub_abilities": ["specific sub-ability"]},
-                "environment_y": {"name": "target environment", "assumptions": ["assumption"]},
-                "proxy_claim": "why score_x should indicate ability_z in environment_y",
-                "diagnostic_pressure": ["specific pressure exerted by this case"],
-                "scoring_contract": {
-                    "credit": ["observable behavior that earns credit"],
-                    "penalties": ["shallow or bad behavior that loses credit"],
-                    "uncertainty_policy": "when judges should mark uncertainty",
-                },
-                "leakage_risks": ["how the case or scorer can be gamed"],
-                "known_limits": ["what this benchmark case does not prove"],
-                "coverage_tags": ["short coverage tags"],
-                "negative_controls": [{"output": "known-bad agent output", "should_fail_because": "why score_x should penalize it"}],
-            },
+            "example_output": _example_output_for_domain(self.domain),
         }
         if retry_route_code is not None:
             payload["prior_generation_rejection"] = {
@@ -541,39 +732,32 @@ class SampleGenerator:
             }
         user = json.dumps(payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.8)
+        agent_artifact = _agent_artifact_from_payload(payload)
+        judge_artifact = _judge_artifact_from_payload(payload)
         content = {
             "design_id": design.id,
             "cell": design.cell.model_dump(),
-            "output": payload,
-            "benchmark_case": payload.get("benchmark_case", {}),
-            "score_x": payload.get("score_x", {}),
+            "output": {
+                "agent_artifact": agent_artifact,
+                "judge_artifact": judge_artifact,
+                "ability_z": payload.get("ability_z", {}),
+                "environment_y": payload.get("environment_y", {}),
+            },
+            "agent_artifact": agent_artifact,
+            "judge_artifact": judge_artifact,
             "ability_z": payload.get("ability_z", {}),
             "environment_y": payload.get("environment_y", {}),
-            "proxy_claim": payload.get("proxy_claim", ""),
-            "diagnostic_pressure": list(payload.get("diagnostic_pressure", [])),
-            "scoring_contract": payload.get("scoring_contract", {}),
-            "leakage_risks": list(payload.get("leakage_risks", [])),
-            "known_limits": list(payload.get("known_limits", [])),
-            "coverage_tags": list(payload.get("coverage_tags", [])),
-            "negative_controls": list(payload.get("negative_controls", [])),
         }
         candidate = CandidateSample(
             id=f"{run_id}-candidate-{design.id}-{attempt}",
             design_id=design.id,
             content_hash=stable_hash(content),
             cell=design.cell,
-            output=dict(payload),
-            benchmark_case=dict(payload.get("benchmark_case", {})),
-            score_x=dict(payload.get("score_x", {})),
+            output=dict(content["output"]),
+            agent_artifact=agent_artifact,
+            judge_artifact=judge_artifact,
             ability_z=dict(payload.get("ability_z", {})),
             environment_y=dict(payload.get("environment_y", {})),
-            proxy_claim=str(payload.get("proxy_claim", "")),
-            diagnostic_pressure=list(payload.get("diagnostic_pressure", [])),
-            scoring_contract=dict(payload.get("scoring_contract", {})),
-            leakage_risks=list(payload.get("leakage_risks", [])),
-            known_limits=list(payload.get("known_limits", [])),
-            coverage_tags=list(payload.get("coverage_tags", [])),
-            negative_controls=list(payload.get("negative_controls", [])),
             difficulty=design.cell.difficulty,
             case_type=design.cell.case_type,
             provenance={"design_id": design.id, "generator": self.role_name},
@@ -596,13 +780,15 @@ class SampleGenerator:
             "The adversary is not helping you and is not responsible for improvements. Treat its report as falsification evidence about why the prior candidate was a weak proxy. "
             "Your goal is not to minimally survive the attack report. Your goal is to produce a stronger benchmark candidate whose actual artifact gives better evidence of the target ability. "
             "Address the underlying failure classes exposed by the attack report: leakage, toy local fixes, fake difficulty, scoring ambiguity, and shallow pass paths. "
-            "Do not merely add prose warnings, disallowed-solution text, or a negative control naming the exploit. If the prior artifact's core repair is inherently toy-shaped, replace the artifact with a stronger instantiation of the same design rather than decorating the old one. "
-            "Preserve the design's intended ability and environment. Return a complete replacement JSON object matching the required schema. "
+            "Do not merely add prose warnings, disallowed-solution text, or a negative control naming the exploit. If the prior artifact's core repair is inherently toy-shaped, replace the weak files with stronger complete file contents rather than decorating the old task. "
+            "Preserve the design's intended ability and environment. Return a revision patch JSON object only, never a complete benchmark candidate. "
+            "Use benchmark_case_updates for allowed benchmark_case replacements, metadata_updates for allowed metadata replacements, and environment_ops for virtual workspace file changes. "
+            "For file changes, emit complete file contents with write_file; delete obsolete files with delete_file. "
             "Do not include meta-discussion about the adversary or the revision process in candidate-facing materials. Return JSON only."
         )
         user_payload = {
             "design_brief": design.model_dump(mode="json"),
-            "prior_candidate": candidate.model_dump(mode="json"),
+            "prior_candidate": candidate.model_dump(mode="json", exclude={"output"}),
             "adversary_attack_report": report.model_dump(mode="json"),
             "domain": {
                 "output_schema": self.domain.output_schema,
@@ -612,25 +798,38 @@ class SampleGenerator:
                 "diagnostic_pressure_types": self.domain.diagnostic_pressure_types,
                 "scoring_methods": self.domain.scoring_methods,
             },
-            "required_json_schema": self.domain.output_schema,
+            "required_revision_patch_shape": _revision_patch_shape(self.domain),
+            "revision_patch_rules": [
+                "Return only keys from required_revision_patch_shape.",
+                "Do not return benchmark_case, environment_artifact, score_x, ability_z, environment_y, or any complete candidate object at the top level.",
+                "Do not change ability_z or environment_y; if the candidate cannot be rescued within those, the adversary should have nuked it.",
+                "Every write_file content value must be the complete desired file content, not a diff or partial snippet.",
+                "Do not include raw output, ids, provenance, route codes, or stage metadata.",
+            ],
         }
         user = json.dumps(user_payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.6)
+        revised_fields = _apply_revision_patch(candidate, payload)
         content = {
             "design_id": design.id,
             "cell": design.cell.model_dump(),
-            "output": payload,
-            "benchmark_case": payload.get("benchmark_case", {}),
-            "score_x": payload.get("score_x", {}),
-            "ability_z": payload.get("ability_z", {}),
-            "environment_y": payload.get("environment_y", {}),
-            "proxy_claim": payload.get("proxy_claim", ""),
-            "diagnostic_pressure": list(payload.get("diagnostic_pressure", [])),
-            "scoring_contract": payload.get("scoring_contract", {}),
-            "leakage_risks": list(payload.get("leakage_risks", [])),
-            "known_limits": list(payload.get("known_limits", [])),
-            "coverage_tags": list(payload.get("coverage_tags", [])),
-            "negative_controls": list(payload.get("negative_controls", [])),
+            "revision_patch": payload,
+            "agent_artifact": {
+                "benchmark_case": revised_fields["benchmark_case"],
+                "environment_artifact": revised_fields["environment_artifact"],
+            },
+            "judge_artifact": {
+                "score_x": revised_fields["score_x"],
+                "proxy_claim": revised_fields["proxy_claim"],
+                "diagnostic_pressure": list(revised_fields["diagnostic_pressure"]),
+                "scoring_contract": revised_fields["scoring_contract"],
+                "leakage_risks": list(revised_fields["leakage_risks"]),
+                "known_limits": list(revised_fields["known_limits"]),
+                "coverage_tags": list(revised_fields["coverage_tags"]),
+                "negative_controls": list(revised_fields["negative_controls"]),
+            },
+            "ability_z": revised_fields["ability_z"],
+            "environment_y": revised_fields["environment_y"],
             "revision_of": candidate.id,
             "adversary_report": report.model_dump(mode="json"),
         }
@@ -639,18 +838,10 @@ class SampleGenerator:
             design_id=design.id,
             content_hash=stable_hash(content),
             cell=design.cell,
-            output=dict(payload),
-            benchmark_case=dict(payload.get("benchmark_case", {})),
-            score_x=dict(payload.get("score_x", {})),
-            ability_z=dict(payload.get("ability_z", {})),
-            environment_y=dict(payload.get("environment_y", {})),
-            proxy_claim=str(payload.get("proxy_claim", "")),
-            diagnostic_pressure=list(payload.get("diagnostic_pressure", [])),
-            scoring_contract=dict(payload.get("scoring_contract", {})),
-            leakage_risks=list(payload.get("leakage_risks", [])),
-            known_limits=list(payload.get("known_limits", [])),
-            coverage_tags=list(payload.get("coverage_tags", [])),
-            negative_controls=list(payload.get("negative_controls", [])),
+            agent_artifact=content["agent_artifact"],
+            judge_artifact=content["judge_artifact"],
+            ability_z=dict(revised_fields["ability_z"]),
+            environment_y=dict(revised_fields["environment_y"]),
             difficulty=design.cell.difficulty,
             case_type=design.cell.case_type,
             provenance={"design_id": design.id, "generator": self.role_name, "revision_of": candidate.id},
@@ -748,13 +939,11 @@ class _GateValidator:
                     "anti_overfit_policy": self.domain.anti_overfit_policy,
                     "route_codes": self.domain.route_codes,
                     "subcodes": self.domain.subcodes,
-                    "reason_codes": self.domain.reason_codes,
                 },
                 "required_json_shape": {
                     "verdict": "accept or reject",
                     "route_code": "accept or reject_semantic_mismatch",
                     "subcodes": ["descriptive labels only"],
-                    "reason_codes": ["descriptive labels only"],
                     "evidence": [{"source": "candidate", "path": "field", "value": "short span"}],
                     "rationale": "2-5 sentence public justification for the verdict, citing concrete candidate fields; no hidden chain-of-thought",
                 },
@@ -764,16 +953,14 @@ class _GateValidator:
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.2)
         verdict = _verdict(payload.get("verdict"))
         subcodes = list(payload.get("subcodes", []))
-        reason_codes = list(payload.get("reason_codes", []))
         route_code = _route_code(
             payload.get("route_code"),
             default=RouteCode.ACCEPT if verdict == Verdict.ACCEPT else RouteCode.REJECT_SEMANTIC_MISMATCH,
         )
-        verdict, route_code, subcodes, reason_codes = _coerce_gate_verdict(
+        verdict, route_code, subcodes = _coerce_gate_verdict(
             verdict=verdict,
             route_code=route_code,
             subcodes=subcodes,
-            reason_codes=reason_codes,
         )
         sample_verdict = SampleVerdict(
             candidate_id=candidate.id,
@@ -781,7 +968,6 @@ class _GateValidator:
             verdict=verdict,
             route_code=route_code,
             subcodes=subcodes,
-            reason_codes=reason_codes,
             evidence=_evidence(payload.get("evidence", [])),
             rationale=str(payload.get("rationale", "")),
         )
@@ -893,16 +1079,14 @@ def _coerce_gate_verdict(
     verdict: Verdict,
     route_code: RouteCode,
     subcodes: list[str],
-    reason_codes: list[str],
-) -> tuple[Verdict, RouteCode, list[str], list[str]]:
-    labels = {str(code) for code in [*subcodes, *reason_codes]}
+) -> tuple[Verdict, RouteCode, list[str]]:
+    labels = {str(code) for code in subcodes}
     reject_labels = sorted(labels & _REJECT_SIGNAL_CODES)
     if verdict == Verdict.ACCEPT and reject_labels:
         merged_subcodes = _dedupe([*subcodes, *reject_labels])
-        merged_reason_codes = _dedupe([*reason_codes, *reject_labels])
         route = RouteCode.REJECT_LEAKAGE if "shortcut_leakage" in reject_labels else RouteCode.REJECT_SEMANTIC_MISMATCH
-        return Verdict.REJECT, route, merged_subcodes, merged_reason_codes
-    return verdict, route_code, subcodes, reason_codes
+        return Verdict.REJECT, route, merged_subcodes
+    return verdict, route_code, subcodes
 
 
 def _dedupe(values: list[str]) -> list[str]:

@@ -13,11 +13,9 @@ def route_after(
     max_design_retries: int = 2,
     max_generation_retries: int = 2,
     subcodes: list[str] | None = None,
-    reason_codes: list[str] | None = None,
     attempt_of: str | None = None,
 ) -> RoutingDecision:
     subcodes = subcodes or []
-    reason_codes = reason_codes or []
 
     next_stage: StageKind | None = None
     context_policy = ContextPolicy.FRESH
@@ -81,11 +79,9 @@ def route_after(
         verdict=final_verdict,
         route_code=final_route,
         subcodes=subcodes,
-        reason_codes=reason_codes,
         next_stage=next_stage,
         context_policy=context_policy,
         retry_index=retry_index,
         attempt_of=attempt_of,
         terminal=terminal,
     )
-

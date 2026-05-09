@@ -1,5 +1,4 @@
 domain_id: benchmark_code_debug
-dataset_version: poc-2
 
 case_types:
   - proxy_strong
@@ -46,8 +45,6 @@ route_codes:
   - retry_parse
   - retry_provider_empty
   - drop_retry_exhausted
-  - drop_timeout
-  - drop_policy_ceiling
 
 subcodes:
   - proxy_strong
@@ -63,6 +60,17 @@ subcodes:
   - missing_known_limits
   - missing_negative_control
   - missing_oracle
+  - missing_workspace
+  - invalid_workspace_file
+  - invalid_workspace_path
+  - duplicate_workspace_path
+  - placeholder_workspace_file
+  - missing_workspace_command
+  - unsupported_workspace_test_command
+  - workspace_test_command_failed
+  - workspace_test_timeout
+  - workspace_tests_do_not_reproduce_failure
+  - answer_leak_in_candidate_materials
   - schema_violation
   - unknown_case_type
   - unknown_difficulty
@@ -70,23 +78,6 @@ subcodes:
   - duplicate_design
   - near_duplicate
   - provider_error
-
-reason_codes:
-  - proxy_strong
-  - weak_proxy_validity
-  - unreliable_score
-  - weak_diagnostic_pressure
-  - shortcut_leakage
-  - vague_scoring_contract
-  - fake_difficulty
-  - irrelevant_environment
-  - ambiguous_success_criteria
-  - overbroad_proxy_claim
-  - missing_known_limits
-  - missing_negative_control
-  - missing_oracle
-  - schema_violation
-  - near_duplicate
 
 novelty_threshold: 0.08
 max_design_retries: 2
@@ -99,19 +90,24 @@ deterministic_rules:
   min_diagnostic_pressure_items: 2
   min_leakage_risk_items: 1
   min_known_limit_items: 1
+  execute_workspace_tests: true
+  require_initial_test_failure: true
+  workspace_test_timeout_seconds: 10
 
 semantic_rules:
   - Judge the benchmark candidate as a proxy for a debugging ability, not as a polished programming exercise.
   - "Judge the local artifact itself: read the prompt, files, visible outputs, negative controls, and scoring dimensions as one benchmark instrument."
   - Treat each candidate as merely plausible until evidence promotes it into a useful benchmark proxy.
-  - Accept only when score_x is explicit enough to be applied consistently to an agent output.
+  - Do not demand exhaustive rubric machinery. A lightweight scoring contract is acceptable when the local benchmark artifact itself creates strong evidence about ability.
   - Accept only when the proxy_claim explains why score_x should indicate ability_z in environment_y.
   - "Accept only when the benchmark artifact itself creates meaningful diagnostic pressure; judge-facing aids may support scoring but must not be the source of difficulty."
   - Criteria are not exhaustive; reject obvious fake compliance, loophole exploitation, or bad-faith literalism even when the exact shortcut is not listed.
   - Hard reject any candidate-facing material that reveals, labels, or strongly hints at the intended root cause, faulty line, fix, or scoring answer.
+  - Hard reject workspaces that read like exercises, tutorials, answer keys, postmortems, benchmark descriptions, or grading notes. Candidate-facing files should look like ordinary application/library code, tests, fixtures, logs, and docs.
   - Reject cases that can be passed by traceback reading, surface pattern matching, or mechanical token substitution without demonstrating causal understanding of the fault.
   - Reject fake-hard cases whose difficulty comes from verbose or obfuscated code rather than meaningful diagnostic pressure.
-  - Reject scoring contracts that over-reward passing the visible failing test without verifying the fix addresses root cause and does not regress orthogonal behavior.
+  - Reject visible tests that fully specify the repair path. Failing tests should expose symptoms and invariants, not narrate the hidden causal chain.
+  - Reject scoring contracts that over-reward passing the visible failing test, but do not force the generator to put judge-facing causal answers into candidate-facing materials.
   - Require named leakage risks and known limits; honest uncertainty is part of a benchmark case.
   - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
 
@@ -216,6 +212,7 @@ quality_gate_rules:
   - Accept when difficulty comes from real capability pressure — misleading error messages, interacting bugs, silent failures, or fix-that-regresses structures — rather than code volume or import complexity.
   - Reject if leakage risks are merely named but not materially defeated by the artifact design.
   - Hard reject if candidate-facing code, tests, comments, names, prompt text, or visible outputs reveal or nearly reveal the intended root cause, faulty expression, fix, or scoring answer.
+  - Hard reject if candidate-facing materials explain the bug like a teaching exercise. Source comments should explain ordinary code intent, not the benchmark's hidden diagnosis; tests should assert behavior, not tell the solver the causal chain.
   - Reject when an obvious pattern-matching shortcut (traceback patching, test-output overfitting) would let a weak model pass, even if not explicitly named in the prompt or rubric.
   - Reject when success can be achieved by mechanical substitution, generic defensive guards, or visible-test compliance without demonstrating ability_z.
   - Reject when the case mostly detects floor ability (can the model read a traceback?) while claiming to measure high ability (does the model reason causally?).
@@ -224,19 +221,19 @@ quality_gate_rules:
 
 rubric_gate_rules:
   - Judge scoring reliability only. Reject scoring contracts that let weak artifacts pass as strong benchmarks.
-  - Inspect whether score_x can be applied consistently to the agent output without graders inventing missing ground truth.
-  - Treat the scoring setup as rejected until score_x and scoring_contract provide enough evidence to promote it as a reliable grading method.
-  - Accept when score_x and scoring_contract are concrete enough for a competent judge to apply with bounded variance.
-  - Accept only when score_x names how visible tests, artifact evidence, explanation quality, and known shallow fixes affect credit.
-  - Accept when negative_controls exercise known failure paths (traceback patch, test-passing try/except) and should be clearly penalized by the scoring contract.
-  - Accept when scoring dimensions name observable output behaviors and include clear credit, penalty, and uncertainty handling.
+  - Rubric reliability is subordinate to benchmark quality. Do not reward a candidate for making scoring easy by leaking the answer or narrowing the task into a fill-in-the-blank exercise.
+  - Accept lightweight score_x and scoring_contract fields when they identify the major credit/penalty boundaries without bloating the benchmark or exposing the hidden causal chain.
+  - Reject only when score_x is too vague to distinguish excellent, adequate, and bad submissions at a basic level.
+  - Do not require the generator to invent exhaustive grading policy, hidden oracle theater, or long boundary-example checklists.
+  - "Accept when score_x names the main evidence sources: tests, patch behavior, diagnostic explanation, and forbidden shallow fixes."
+  - Accept when negative_controls name realistic bad solution families; do not require them to be exhaustive.
   - Accept only when the scoring contract preserves room for unexpected excellent solutions that differ from the anticipated fix.
   - Accept only when judges are empowered to penalize obvious gaming — a fix that passes the visible test by silencing the exception rather than resolving the root cause.
   - Reject if a shallow patch, visible-test-only patch, explanation-only answer, or toy one-line repair can receive a high score.
   - Reject when the benchmark's candidate-facing materials leak the answer so badly that the scoring contract cannot distinguish diagnosis from clue-following.
   - Require table-stakes checks (code is syntactically valid, visible test passes) to be represented as disqualifiers or penalties, not as the main high-score signal.
   - Reject scoring contracts that treat the written criteria as exhaustive and would give high scores to obvious loophole exploits.
-  - Reject vibes-only criteria, unbounded rater discretion, missing boundary examples, or scoring contracts that reward the wrong behavior.
+  - Reject vibes-only criteria or scoring contracts that reward the wrong behavior, but do not reject merely because the rubric is compact.
   - Reject when known-bad outputs (correct patch, wrong explanation; test passes but regression breaks) could receive high scores.
   - Reject when a clearly excellent but structurally different correct fix would be unfairly punished by the rubric.
   - Evidence must cite candidate fields. Do not rewrite or repair the benchmark candidate.
@@ -250,17 +247,30 @@ generator_guidance:
     product bug rather than a Python kata. Do not settle for a toy unit-test repair
     when the design asks for a hard benchmark; make the case compact enough to
     understand but rich enough that success requires real engineering judgment.
+    The candidate must include environment_artifact.kind = virtual_workspace with
+    concrete file paths, complete file contents, and a runnable pytest command.
+    Prefer "python -m pytest -q" for Python workspaces. Do not describe a
+    hypothetical repo layout in prose when the evaluated agent needs actual files
+    to inspect.
+    Candidate-facing files must look like ordinary production/test artifacts, not
+    benchmark scaffolding. Do not write comments, README text, tests, logs, or
+    prompt prose that explain the hidden causal chain, identify the intended fix,
+    say why the starter implementation is wrong, or narrate the benchmark design.
+    Code comments may explain normal local intent, interfaces, and domain behavior.
+    Tests should assert product behavior and invariants; they should not teach the
+    solver the diagnosis.
     Focus this generation step on the candidate-facing scenario. Later pipeline
     stages will handle evaluation details. If the schema requires scoring fields,
     keep them lightweight and provisional; they should describe the intended
     evaluation direction without becoming more elaborate than the benchmark itself.
 
   scoring_contract_bar: >
-    Keep scoring dimensions lightweight in this phase. They should state the broad
-    behaviors a later evaluator would care about, but they should not force the
-    generator to invent an exhaustive scoring policy. Avoid turning the scenario
-    into a checklist-shaped artifact whose metadata is more elaborate than the
-    benchmark itself.
+    Keep scoring dimensions lightweight. State the broad behaviors a later evaluator
+    would care about: tests pass for the right reason, the patch is bounded, the
+    explanation identifies the relevant causal region, and shallow/gaming fixes are
+    penalized. Do not invent exhaustive scoring policy, hidden oracle theater, or
+    long boundary-example checklists. Never make candidate-facing materials more
+    explicit just to make the rubric easier to apply.
 
   proxy_claim_bar: >
     proxy_claim should be short and provisional. Explain what ability the scenario is
@@ -276,6 +286,20 @@ generator_guidance:
     should not be the central task. Never include
     candidate-facing comments, labels, names, fixture strings, prompt text, or visible
     outputs that identify the intended root cause, faulty expression, or repair.
+    Do not place exercise-author comments in source files such as "BUG:",
+    "intentionally buggy", "root cause", "current code incorrectly", "should use",
+    or "intended fix"; comments may explain normal domain behavior, but not why the
+    starter implementation is wrong.
+    Do not replace explicit answer leaks with softer answer leaks. Phrases that walk
+    through the causal mechanism, explain the exact bad interleaving, or describe the
+    intended invariant repair are still leaks when shown to the evaluated agent. Put
+    that information in judge-facing metadata, not in the workspace.
+    Candidate-facing prompts may refer to files only if those files are present in
+    environment_artifact.payload.files with complete contents. The advertised test
+    command must collect and run in a fresh materialized workspace, and the starter
+    code should have at least one failing test that demonstrates the benchmark's
+    target failure. Do not use ellipses, omitted sections, placeholders, or "assume
+    this file exists" language.
 
   common_rejection_patterns:
     - name: wrapper_story_over_artifact_quality

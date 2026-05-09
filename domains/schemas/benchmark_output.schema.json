@@ -3,19 +3,86 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "benchmark_case",
-    "score_x",
+    "agent_artifact",
+    "judge_artifact",
     "ability_z",
-    "environment_y",
-    "proxy_claim",
-    "diagnostic_pressure",
-    "scoring_contract",
-    "leakage_risks",
-    "known_limits",
-    "coverage_tags",
-    "negative_controls"
+    "environment_y"
   ],
   "properties": {
+    "agent_artifact": {
+      "type": "object",
+      "required": ["benchmark_case"],
+      "additionalProperties": false,
+      "properties": {
+        "benchmark_case": {"$ref": "#/$defs/benchmark_case"},
+        "environment_artifact": {"$ref": "#/$defs/environment_artifact"}
+      }
+    },
+    "judge_artifact": {
+      "type": "object",
+      "required": [
+        "score_x",
+        "proxy_claim",
+        "diagnostic_pressure",
+        "scoring_contract",
+        "leakage_risks",
+        "known_limits",
+        "coverage_tags",
+        "negative_controls"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "score_x": {"$ref": "#/$defs/score_x"},
+        "proxy_claim": {"type": "string", "minLength": 80},
+        "diagnostic_pressure": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"type": "string"}
+        },
+        "scoring_contract": {"$ref": "#/$defs/scoring_contract"},
+        "leakage_risks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"}
+        },
+        "known_limits": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"}
+        },
+        "coverage_tags": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "negative_controls": {"$ref": "#/$defs/negative_controls"}
+      }
+    },
+    "ability_z": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "sub_abilities": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "environment_y": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "assumptions": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    }
+  },
+  "$defs": {
     "benchmark_case": {
       "type": "object",
       "required": ["prompt"],
@@ -25,6 +92,15 @@
         "setup": {"type": "string"},
         "inputs": {"type": "object"},
         "environment": {"type": "object"}
+      }
+    },
+    "environment_artifact": {
+      "type": "object",
+      "required": ["kind", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "payload": {"type": "object"}
       }
     },
     "score_x": {
@@ -56,36 +132,6 @@
         }
       }
     },
-    "ability_z": {
-      "type": "object",
-      "required": ["name"],
-      "additionalProperties": true,
-      "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "sub_abilities": {
-          "type": "array",
-          "items": {"type": "string"}
-        }
-      }
-    },
-    "environment_y": {
-      "type": "object",
-      "required": ["name"],
-      "additionalProperties": true,
-      "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "assumptions": {
-          "type": "array",
-          "items": {"type": "string"}
-        }
-      }
-    },
-    "proxy_claim": {"type": "string", "minLength": 80},
-    "diagnostic_pressure": {
-      "type": "array",
-      "minItems": 2,
-      "items": {"type": "string"}
-    },
     "scoring_contract": {
       "type": "object",
       "required": ["credit", "penalties"],
@@ -103,20 +149,6 @@
         },
         "uncertainty_policy": {"type": "string"}
       }
-    },
-    "leakage_risks": {
-      "type": "array",
-      "minItems": 1,
-      "items": {"type": "string"}
-    },
-    "known_limits": {
-      "type": "array",
-      "minItems": 1,
-      "items": {"type": "string"}
-    },
-    "coverage_tags": {
-      "type": "array",
-      "items": {"type": "string"}
     },
     "negative_controls": {
       "type": "array",

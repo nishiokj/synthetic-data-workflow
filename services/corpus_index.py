@@ -18,7 +18,7 @@ class CorpusIndex:
     def __init__(self, data_dir: Path, domain: DomainConfig, embedding_client: EmbeddingClient, run_id: str) -> None:
         self.domain = domain
         self.embedding_client = embedding_client
-        self.index_path = data_dir / "index" / domain.domain_id / domain.dataset_version / "embeddings.jsonl"
+        self.index_path = data_dir / "index" / domain.domain_id / "embeddings.jsonl"
         self.corpus_path = data_dir / "corpus" / "benchmark" / f"{run_id}.jsonl"
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.corpus_path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +44,6 @@ class CorpusIndex:
                     verdict=Verdict.REJECT,
                     route_code=RouteCode.REJECT_DUPLICATE,
                     subcodes=["near_duplicate"],
-                    reason_codes=["near_duplicate"],
                 ),
                 meta,
             )
@@ -65,7 +64,7 @@ class CorpusIndex:
             self.index_path,
             {"embedding_ref": embedding_ref, "candidate_id": candidate.id, "vector": vector},
         )
-        self._append_jsonl(self.corpus_path, committed.model_dump(mode="json"))
+        self._append_jsonl(self.corpus_path, _committed_corpus_record(committed))
         return (
             committed,
             SampleVerdict(
@@ -96,6 +95,14 @@ class CorpusIndex:
             handle.write(json.dumps(value, sort_keys=True) + "\n")
 
 
+def _committed_corpus_record(committed: CommittedSample) -> dict[str, object]:
+    record = committed.model_dump(mode="json")
+    candidate = record.get("candidate")
+    if isinstance(candidate, dict):
+        candidate.pop("output", None)
+    return record
+
+
 def _cosine(left: list[float], right: list[float]) -> float:
     dot = sum(a * b for a, b in zip(left, right))
     left_norm = math.sqrt(sum(a * a for a in left))
@@ -106,14 +113,17 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 
 def _embedding_text(candidate: CandidateSample) -> str:
+    agent = candidate.agent_artifact
+    judge = candidate.judge_artifact
     return "\n".join(
         [
-            json.dumps(candidate.benchmark_case, sort_keys=True),
+            json.dumps(agent.benchmark_case, sort_keys=True),
+            json.dumps(agent.environment_artifact.model_dump(mode="json") if agent.environment_artifact else {}, sort_keys=True),
             json.dumps(candidate.ability_z, sort_keys=True),
             json.dumps(candidate.environment_y, sort_keys=True),
-            candidate.proxy_claim,
-            "\n".join(candidate.diagnostic_pressure),
-            json.dumps(candidate.score_x, sort_keys=True),
-            "\n".join(candidate.coverage_tags),
+            judge.proxy_claim,
+            "\n".join(judge.diagnostic_pressure),
+            json.dumps(judge.score_x, sort_keys=True),
+            "\n".join(judge.coverage_tags),
         ]
     )
