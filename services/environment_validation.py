@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import sys
@@ -64,6 +65,15 @@ def validate_environment_artifact(candidate: CandidateSample, domain: DomainConf
             )
 
     if completed.returncode == 1:
+        max_failure_files = int(domain.deterministic_rules.get("max_initial_failure_files", 0))
+        failed_files = _pytest_failed_test_files(completed.stdout, completed.stderr)
+        if max_failure_files > 0 and len(failed_files) > max_failure_files:
+            return _failed_environment(
+                "workspace_test_command_failed",
+                f"workspace starter tests fail across too many test files: {', '.join(failed_files)}",
+                "environment_artifact.payload.commands.test",
+                output=_short_command_output(completed.stdout, completed.stderr),
+            )
         return CheckResult(
             check_id="environment_artifact",
             passed=True,
@@ -114,6 +124,16 @@ def _short_command_output(stdout: str | None, stderr: str | None) -> str:
     if len(output) > 1600:
         return output[:1600] + "\n...[truncated]"
     return output
+
+
+def _pytest_failed_test_files(stdout: str | None, stderr: str | None) -> list[str]:
+    output = "\n".join(part for part in [stdout or "", stderr or ""] if part)
+    failed_files: set[str] = set()
+    for line in output.splitlines():
+        match = re.match(r"^FAILED\s+([^:\s]+)::", line.strip())
+        if match:
+            failed_files.add(match.group(1))
+    return sorted(failed_files)
 
 
 def _failed_environment(subcode: str, value: str, path: str, *, output: str = "") -> CheckResult:

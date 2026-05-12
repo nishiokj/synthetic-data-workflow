@@ -118,6 +118,7 @@ def _embedding_text(candidate: CandidateSample) -> str:
     return "\n".join(
         [
             json.dumps(agent.benchmark_case, sort_keys=True),
+            json.dumps(agent.runtime_requirements or {}, sort_keys=True),
             json.dumps(agent.environment_artifact.model_dump(mode="json") if agent.environment_artifact else {}, sort_keys=True),
             json.dumps(candidate.ability_z, sort_keys=True),
             json.dumps(candidate.environment_y, sort_keys=True),

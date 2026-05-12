@@ -28,6 +28,35 @@ def test_virtual_workspace_round_trips_and_materializes_files() -> None:
         assert (materialized.path / "src/app.py").read_text(encoding="utf-8").startswith("def main")
 
 
+def test_virtual_workspace_allows_empty_package_marker_files() -> None:
+    workspace = VirtualWorkspace.from_payload(
+        _payload(
+            files=[
+                {"path": "src/__init__.py", "content": ""},
+                {"path": "src/app.py", "content": "def main():\n    return 1\n"},
+                {"path": "tests/test_app.py", "content": "def test_app():\n    assert True\n"},
+            ]
+        )
+    )
+
+    assert workspace.read_file("src/__init__.py") == ""
+
+
+def test_virtual_workspace_rejects_empty_non_marker_files() -> None:
+    with pytest.raises(VirtualWorkspaceError) as exc:
+        VirtualWorkspace.from_payload(
+            _payload(
+                files=[
+                    {"path": "src/app.py", "content": ""},
+                    {"path": "tests/test_app.py", "content": "def test_app():\n    assert True\n"},
+                    {"path": "README.md", "content": "Run tests."},
+                ]
+            )
+        )
+
+    assert exc.value.subcode == "invalid_workspace_file"
+
+
 def test_virtual_workspace_rejects_unsafe_paths() -> None:
     with pytest.raises(VirtualWorkspaceError) as exc:
         VirtualWorkspace.from_payload(

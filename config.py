@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 class ModelConfig(BaseModel):
     provider: str = "openai"
-    model: str = "gpt-5-mini"
+    model: str = "gpt-5.5"
     embedding_model: str = "text-embedding-3-small"
     base_url: str = "https://api.openai.com/v1"
     reasoning_effort: Optional[str] = "medium"
@@ -113,7 +113,7 @@ def build_runtime_config(
     domain = load_domain(domain_path)
     models = ModelConfig(
         provider=provider or os.getenv("OPENAI_PROVIDER", "openai"),
-        model=model or os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        model=model or os.getenv("OPENAI_MODEL", "gpt-5.5"),
         embedding_model=embedding_model
         or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),

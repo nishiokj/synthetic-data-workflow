@@ -66,6 +66,17 @@ def _validate_design_environment(design: Any, domain: DomainConfig) -> tuple[Ver
     if not isinstance(env_design, dict):
         return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
 
+    runtime = getattr(design, "runtime_requirements", {}) or {}
+    if not isinstance(runtime, dict) or not runtime.get("kind"):
+        return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["missing_runtime_requirements"]
+    if runtime.get("kind") == "filesystem_task":
+        execution = runtime.get("execution")
+        if not isinstance(execution, dict) or execution.get("mode") not in {"task_image", "container"} or not execution.get("base_image"):
+            return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["unsupported_runtime_requirements"]
+        commands = runtime.get("commands")
+        if not isinstance(commands, dict) or not commands.get("test"):
+            return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["missing_runtime_requirements"]
+
     missing = [field for field in sorted(_CODE_ENV_DESIGN_REQUIRED_FIELDS) if not env_design.get(field)]
     if missing:
         return Verdict.REJECT, RouteCode.REJECT_CRITERIA_MISMATCH, ["weak_diagnostic_pressure"]
@@ -98,8 +109,9 @@ def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfi
         _benchmark_oracle_check(candidate, domain),
     ]
     if domain.domain_id == "benchmark_code_debug":
+        checks.insert(3, _runtime_requirements_check(candidate, domain))
         checks.insert(3, validate_environment_artifact(candidate, domain))
-        checks.insert(4, _candidate_facing_answer_leak_check(candidate))
+        checks.insert(5, _candidate_facing_answer_leak_check(candidate))
     failed = [check for check in checks if not check.passed]
     if not failed:
         return (
@@ -139,6 +151,90 @@ def _schema_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResu
             evidence=[EvidenceRef(source="jsonschema", path=".".join(map(str, error.path)), value=error.message)],
         )
     return CheckResult(check_id="benchmark_case_schema", passed=True)
+
+
+def _runtime_requirements_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
+    if not bool(domain.deterministic_rules.get("require_runtime_requirements", False)):
+        return CheckResult(check_id="runtime_requirements", passed=True)
+
+    runtime = candidate.agent_artifact.runtime_requirements
+    if not isinstance(runtime, dict) or not runtime.get("kind"):
+        return CheckResult(
+            check_id="runtime_requirements",
+            passed=False,
+            route_code=RouteCode.REJECT_SCHEMA,
+            subcode="missing_runtime_requirements",
+            evidence=[
+                EvidenceRef(
+                    source="deterministic_rule",
+                    path="agent_artifact.runtime_requirements",
+                    value="runtime_requirements.kind is required when a benchmark environment must execute",
+                )
+            ],
+        )
+
+    if runtime.get("kind") != "filesystem_task":
+        return CheckResult(check_id="runtime_requirements", passed=True)
+
+    execution = runtime.get("execution")
+    if (
+        not isinstance(execution, dict)
+        or execution.get("mode") not in {"task_image", "container"}
+        or not isinstance(execution.get("base_image"), str)
+        or not execution["base_image"].strip()
+    ):
+        return CheckResult(
+            check_id="runtime_requirements",
+            passed=False,
+            route_code=RouteCode.REJECT_SCHEMA,
+            subcode="unsupported_runtime_requirements",
+            evidence=[
+                EvidenceRef(
+                    source="deterministic_rule",
+                    path="agent_artifact.runtime_requirements.execution",
+                    value="filesystem_task benchmarks must declare execution.mode task_image/container and a base_image",
+                )
+            ],
+        )
+
+    commands = runtime.get("commands")
+    if not isinstance(commands, dict) or not isinstance(commands.get("test"), str) or not commands["test"].strip():
+        return CheckResult(
+            check_id="runtime_requirements",
+            passed=False,
+            route_code=RouteCode.REJECT_SCHEMA,
+            subcode="missing_runtime_requirements",
+            evidence=[
+                EvidenceRef(
+                    source="deterministic_rule",
+                    path="agent_artifact.runtime_requirements.commands.test",
+                    value="filesystem_task runtime_requirements must declare the visible test command",
+                )
+            ],
+        )
+
+    artifact = candidate.agent_artifact.environment_artifact
+    artifact_command = None
+    if artifact is not None and artifact.kind == "virtual_workspace":
+        payload_commands = artifact.payload.get("commands")
+        if isinstance(payload_commands, dict):
+            artifact_command = payload_commands.get("test")
+    if artifact_command is not None and artifact_command != commands["test"]:
+        return CheckResult(
+            check_id="runtime_requirements",
+            passed=False,
+            route_code=RouteCode.REJECT_SCHEMA,
+            subcode="runtime_contract_mismatch",
+            evidence=[
+                EvidenceRef(
+                    source="deterministic_rule",
+                    path="agent_artifact.environment_artifact.payload.commands.test",
+                    value="workspace test command does not match runtime_requirements.commands.test",
+                )
+            ],
+        )
+
+    return CheckResult(check_id="runtime_requirements", passed=True)
 
 
 def _output_schema_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
@@ -183,45 +279,22 @@ def _text_hygiene_check(candidate: CandidateSample) -> CheckResult:
 _ANSWER_LEAK_PATTERNS = (
     "bug:",
     "bug note",
-    "bug (intentional",
     "bug intentionally",
     "intentionally buggy",
     "intentional bug",
-    "root cause",
+    "root cause:",
     "source of the bug",
     "source of this bug",
-    "the intended fix",
+    "intended fix",
     "exact fix",
     "faulty line",
     "current code incorrectly",
     "currently incorrectly",
-    "incorrectly only",
-    "should be keyed",
-    "should use",
-    "should update",
-    "should set",
-    "should invalidate",
-    "before the transaction commits",
-    "before tx.commit",
-    "before committing",
-    "before commit",
-    "after commit",
-    "causal chain",
-    "causal interleaving",
-    "hidden causal chain",
     "intended invariant",
-    "intended correct",
     "intended behavior",
     "starter code",
     "starter workspace",
     "your fix should",
-    "the task for",
-    "acceptable solutions",
-    "naive fixes",
-    "shallow fixes",
-    "regression test to catch",
-    "detect naive",
-    "benchmark",
 )
 
 
@@ -249,15 +322,8 @@ def _candidate_facing_answer_leak_check(candidate: CandidateSample) -> CheckResu
 def _candidate_facing_texts(candidate: CandidateSample) -> list[tuple[str, str]]:
     texts: list[tuple[str, str]] = []
     benchmark_case = candidate.agent_artifact.benchmark_case
-    for key in ("prompt", "setup"):
-        value = benchmark_case.get(key)
-        if isinstance(value, str):
-            texts.append((f"benchmark_case.{key}", value))
-    environment = benchmark_case.get("environment")
-    if isinstance(environment, dict):
-        for key, value in environment.items():
-            if isinstance(value, str):
-                texts.append((f"benchmark_case.environment.{key}", value))
+    for key in ("prompt", "setup", "inputs", "environment"):
+        texts.extend(_string_values(f"benchmark_case.{key}", benchmark_case.get(key)))
 
     artifact = candidate.agent_artifact.environment_artifact
     if artifact is not None and artifact.kind == "virtual_workspace":
@@ -273,6 +339,22 @@ def _candidate_facing_texts(candidate: CandidateSample) -> list[tuple[str, str]]
                 if isinstance(content, str):
                     texts.append((f"environment_artifact.payload.files.{index}.content", content))
     return texts
+
+
+def _string_values(path: str, value: Any) -> list[tuple[str, str]]:
+    if isinstance(value, str):
+        return [(path, value)]
+    if isinstance(value, dict):
+        texts: list[tuple[str, str]] = []
+        for key, nested in value.items():
+            texts.extend(_string_values(f"{path}.{key}", nested))
+        return texts
+    if isinstance(value, list):
+        texts = []
+        for index, nested in enumerate(value):
+            texts.extend(_string_values(f"{path}.{index}", nested))
+        return texts
+    return []
 
 
 def _taxonomy_check(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:

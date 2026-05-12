@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import socket
 from typing import Any
 
 import pytest
 
-from agents import OpenAIClient, ProviderError, SampleGenerator, _coerce_gate_verdict
+from agents import Designer, OpenAIClient, ProviderError, SampleGenerator, _coerce_gate_verdict
 from config import ModelConfig, load_domain
 from models import AdversaryReport, CandidateSample, DesignBrief, RouteCode, TaxonomyCell, Verdict
 
@@ -155,6 +156,14 @@ def _code_design() -> DesignBrief:
             "actual_causal_region": "refund normalization before aggregation",
             "required_depth": "requires tracing value semantics across modules",
         },
+        runtime_requirements={
+            "kind": "filesystem_task",
+            "execution": {"mode": "task_image", "base_image": "python:3.11-slim", "os": "linux", "arch": "amd64"},
+            "language": {"name": "python", "version": "3.11+"},
+            "dependencies": {"policy": "stdlib_plus_runner", "packages": ["pytest"]},
+            "commands": {"test": "python -m pytest -q"},
+            "network": "disabled_during_eval",
+        },
         environment_artifact_spec={"kind": "virtual_workspace"},
         failure_mode_family="misleading aggregate caused by upstream normalization",
         diagnostic_pressure=["misleading downstream symptom"],
@@ -197,6 +206,14 @@ def _code_candidate(design: DesignBrief) -> CandidateSample:
                     ],
                     "commands": {"test": "python -m pytest -q"},
                 },
+            },
+            "runtime_requirements": {
+                "kind": "filesystem_task",
+                "execution": {"mode": "task_image", "base_image": "python:3.11-slim", "os": "linux", "arch": "amd64"},
+                "language": {"name": "python", "version": "3.11+"},
+                "dependencies": {"policy": "stdlib_plus_runner", "packages": ["pytest"]},
+                "commands": {"test": "python -m pytest -q"},
+                "network": "disabled_during_eval",
             },
         },
         judge_artifact={
@@ -243,6 +260,121 @@ class _PatchClient:
             "latency_ms": 1,
             "cost_usd": 0.0,
         }
+
+
+class _GenerateClient:
+    def __init__(self) -> None:
+        self.user_payload: dict[str, Any] | None = None
+
+    def complete_json(self, *, system: str, user: str, temperature: float = 0.4):
+        assert "DESIGN IMPLEMENTATION CONTRACT" in system
+        self.user_payload = json.loads(user)
+        return {
+            "agent_artifact": {
+                "benchmark_case": {
+                    "prompt": "Debug the provided workspace.",
+                    "setup": "Run pytest.",
+                    "inputs": {},
+                    "environment": {"runtime": "python"},
+                },
+                "runtime_requirements": {
+                    "kind": "filesystem_task",
+                    "execution": {"mode": "task_image", "base_image": "python:3.11-slim", "os": "linux", "arch": "amd64"},
+                    "language": {"name": "python", "version": "3.11+"},
+                    "dependencies": {"policy": "stdlib_plus_runner", "packages": ["pytest"]},
+                    "commands": {"test": "python -m pytest -q"},
+                    "network": "disabled_during_eval",
+                },
+            },
+            "judge_artifact": {
+                "score_x": {
+                    "score_type": "hard_checks_plus_rubric",
+                    "dimensions": [
+                        {
+                            "name": "causal_fix",
+                            "weight": 1.0,
+                            "high_score_criterion": "Causal fix.",
+                            "low_score_criterion": "Shallow fix.",
+                        }
+                    ],
+                },
+                "proxy_claim": "This case proxies debugging ability with a visible workspace and judge-facing scoring criteria.",
+                "diagnostic_pressure": ["misleading symptom", "cross-module invariant"],
+                "scoring_contract": {"credit": ["causal fix"], "penalties": ["test edits"]},
+                "leakage_risks": ["Visible tests may invite shallow fixes."],
+                "known_limits": ["Small synthetic workspace."],
+                "coverage_tags": ["debugging"],
+                "negative_controls": [{"output": "edit tests", "should_fail_because": "weakens benchmark"}],
+            },
+            "ability_z": {"name": "fault_localization"},
+            "environment_y": {"name": "single_turn_debug_with_test"},
+        }, {
+            "provider": "test",
+            "model": "fake",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "latency_ms": 1,
+            "cost_usd": 0.0,
+        }
+
+
+class _DesignClient:
+    def __init__(self) -> None:
+        self.system = ""
+        self.user_payload: dict[str, Any] | None = None
+
+    def complete_json(self, *, system: str, user: str, temperature: float = 0.4):
+        self.system = system
+        self.user_payload = json.loads(user)
+        return {"designs": []}, {
+            "provider": "test",
+            "model": "fake",
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "latency_ms": 1,
+            "cost_usd": 0.0,
+        }
+
+
+def test_design_retry_payload_explains_runtime_image_mode() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    client = _DesignClient()
+    designer = Designer(client, domain)
+
+    designer.design(
+        run_id="run",
+        target_n=1,
+        coverage_snapshot={},
+        retry_route_code=RouteCode.REJECT_CRITERIA_MISMATCH,
+        retry_subcodes=["unsupported_runtime_requirements"],
+    )
+
+    assert "never a combined value" in client.system
+    rejection = client.user_payload["prior_design_rejection"]
+    assert rejection["subcodes"] == ["unsupported_runtime_requirements"]
+    assert any("task_image/container" in item for item in rejection["retry_guidance"])
+
+
+def test_generation_retry_payload_includes_actionable_code_debug_guidance() -> None:
+    design = _code_design()
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    client = _GenerateClient()
+    generator = SampleGenerator(client, domain)
+
+    generator.generate(
+        run_id="run",
+        design=design,
+        attempt=2,
+        retry_route_code=RouteCode.REJECT_SCHEMA,
+        retry_subcodes=["workspace_tests_do_not_reproduce_failure", "answer_leak_in_candidate_materials"],
+    )
+
+    rejection = client.user_payload["prior_generation_rejection"]
+    assert rejection["subcodes"] == ["workspace_tests_do_not_reproduce_failure", "answer_leak_in_candidate_materials"]
+    assert any("starter code has at least one deterministic failing pytest assertion" in item for item in rejection["retry_guidance"])
+    assert any("Candidate-facing material leaked the answer" in item for item in rejection["retry_guidance"])
+    assert client.user_payload["design_brief"]["runtime_requirements"]["kind"] == "filesystem_task"
+    assert client.user_payload["example_output"]["agent_artifact"]["runtime_requirements"]["commands"]["test"] == "python -m pytest -q"
 
 
 def test_revision_applies_patch_to_prior_candidate_and_virtual_workspace() -> None:
@@ -295,6 +427,7 @@ def test_revision_applies_patch_to_prior_candidate_and_virtual_workspace() -> No
     assert "billing/reconcile.py" in paths
     assert "revision_rationale" not in revised.output
     assert "environment_ops" not in revised.output
+    assert revised.output["agent_artifact"]["runtime_requirements"]["commands"]["test"] == "python -m pytest -q"
     assert revised.output["agent_artifact"]["environment_artifact"]["payload"]["commands"]["test"] == "python -m pytest -q"
 
 
@@ -314,6 +447,60 @@ def test_revision_rejects_old_full_candidate_output() -> None:
     )
 
     with pytest.raises(ProviderError, match="unsupported top-level keys"):
+        generator.revise_from_attack(
+            run_id="run",
+            design=design,
+            candidate=candidate,
+            report=_attack_report(candidate.id),
+            attempt=2,
+        )
+
+
+def test_revision_tolerates_unchanged_runtime_requirements_field() -> None:
+    design = _code_design()
+    candidate = _code_candidate(design)
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    generator = SampleGenerator(
+        _PatchClient(
+            {
+                "runtime_requirements": candidate.agent_artifact.runtime_requirements,
+                "metadata_updates": {
+                    "proxy_claim": "The revised metadata still preserves the same runtime contract while tightening the judge-facing proxy claim."
+                },
+            }
+        ),
+        domain,
+    )
+
+    revised, _ = generator.revise_from_attack(
+        run_id="run",
+        design=design,
+        candidate=candidate,
+        report=_attack_report(candidate.id),
+        attempt=2,
+    )
+
+    assert revised.agent_artifact.runtime_requirements == candidate.agent_artifact.runtime_requirements
+    assert revised.output["agent_artifact"]["runtime_requirements"] == candidate.agent_artifact.runtime_requirements
+
+
+def test_revision_rejects_runtime_contract_changes() -> None:
+    design = _code_design()
+    candidate = _code_candidate(design)
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    changed_runtime = dict(candidate.agent_artifact.runtime_requirements)
+    changed_runtime["commands"] = {"test": "pytest -q"}
+    generator = SampleGenerator(
+        _PatchClient(
+            {
+                "runtime_requirements": changed_runtime,
+                "metadata_updates": {"proxy_claim": "Try to change runtime."},
+            }
+        ),
+        domain,
+    )
+
+    with pytest.raises(ProviderError, match="cannot change runtime_requirements"):
         generator.revise_from_attack(
             run_id="run",
             design=design,

@@ -165,8 +165,9 @@ class Designer:
     ) -> tuple[list[DesignBrief], dict[str, Any]]:
         system = (
             "You are the Designer for a benchmark-generation pipeline. Produce diagnostic design briefs only. "
-            "You separate benchmark design from implementation: define what the case must reveal, but do not write final prompts, code files, tests, dependencies, rubrics, or answer keys. "
+            "You separate benchmark design from implementation: define what the case must reveal and the runtime requirements the environment needs, but do not write final prompts, code files, tests, dependency manifests, rubrics, or answer keys. "
             "Return JSON only. A design brief is not a topic label; it must define the target ability, environment premise, failure family, diagnostic pressure, shallow paths, and evidence required for success. "
+            "Use exact enum-like strings in runtime_requirements; for filesystem_task execution.mode must be exactly task_image or exactly container, never a combined value. "
             "Reject your own idea before returning it if it naturally becomes a one-line patch, obvious flag/default flip, comparator swap, off-by-one arithmetic repair, cache bypass, synchronous-vs-async toggle, test edit, sleep/timing hack, or direct traceback fix."
         )
         payload: dict[str, Any] = {
@@ -215,6 +216,27 @@ class Designer:
                             "actual_causal_region": "where the real cause should live",
                             "required_depth": "why resolving it requires nontrivial reasoning",
                         },
+                        "runtime_requirements": {
+                            "kind": "none, text_only, filesystem_task, browser_task, or another explicit runtime class",
+                            "execution": {
+                                "mode": "exactly one of: task_image, container, none",
+                                "base_image": "OCI base image tag or digest when mode is task_image or container",
+                                "os": "linux, macos, windows, any, or none",
+                                "arch": "amd64, arm64, any, or none",
+                            },
+                            "language": {
+                                "name": "python, typescript, rust, shell, none, or another language/runtime",
+                                "version": "runtime version or version range when relevant",
+                            },
+                            "dependencies": {
+                                "policy": "none, stdlib_plus_runner, pinned_manifest, lockfile_required, system_packages, or domain-specific policy",
+                                "packages": ["runtime/test dependencies the generated environment must provide"],
+                            },
+                            "commands": {
+                                "test": "canonical visible evaluation command when the environment is executable",
+                            },
+                            "network": "disabled_during_eval, disabled, allowed, or not_applicable",
+                        },
                         "environment_artifact_spec": {
                             "kind": "virtual_workspace or another environment primitive, when the design needs a bounded artifact environment",
                             "required_capabilities": ["materialized artifacts needed by the eventual evaluated entity"],
@@ -237,6 +259,7 @@ class Designer:
             payload["prior_design_rejection"] = {
                 "route_code": retry_route_code.value,
                 "subcodes": retry_subcodes or [],
+                "retry_guidance": _design_retry_guidance(retry_subcodes or []),
             }
         user = json.dumps(payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.7)
@@ -255,6 +278,7 @@ class Designer:
                     target_environment=str(raw["target_environment"]),
                     design_intent=str(raw["design_intent"]),
                     environment_premise=raw["environment_premise"] if isinstance(raw.get("environment_premise"), dict) else {},
+                    runtime_requirements=raw["runtime_requirements"] if isinstance(raw.get("runtime_requirements"), dict) else {},
                     environment_artifact_spec=raw["environment_artifact_spec"] if isinstance(raw.get("environment_artifact_spec"), dict) else {},
                     failure_mode_family=str(raw["failure_mode_family"]),
                     diagnostic_pressure=_string_list(raw.get("diagnostic_pressure", [])),
@@ -305,6 +329,7 @@ class DesignAuditor:
                             "tempting_wrong_fix",
                             "actual_causal_region",
                             "required_depth",
+                            "runtime_requirements",
                             "non_goals",
                         ],
                         "reject_if": [
@@ -362,7 +387,7 @@ checklists without showing the target ability, the candidate has not earned
 promotion.
 
 Aim above the smallest plausible task. Favor cases with meaningful structure:
-multiple interacting signals, a realistic but compact environment, a tempting
+multiple interacting signals, a realistic self-contained subsystem, a tempting
 wrong path, and a scoring setup that can separate adequate from excellent
 outputs. Do not create complexity by adding noise, verbosity, irrelevant files,
 or confusing wording. Create complexity through causal depth, tradeoffs,
@@ -388,6 +413,14 @@ agent to infer, diagnose, judge, repair, or discover something, the prompt,
 inputs, code comments, labels, filenames, visible outputs, fixtures, and setup
 must not reveal or strongly hint at the intended answer. A case that gives away
 its own answer cannot be promoted no matter how strong the rubric looks.
+
+The JSON boundary is part of the benchmark contract. Everything in
+agent_artifact is seen by the evaluated agent at runtime. Everything in
+judge_artifact is unseen judge/rubric metadata. Put diagnosis, intended causal
+mechanism, expected repair characteristics, scoring rationale, negative-control
+explanations, and gaming/shortcut analysis in judge_artifact only. Never copy
+judge-facing answers into agent_artifact.prompt, setup, workspace comments,
+README text, fixture names, visible test names, or visible outputs.
 
 Prefer benchmark designs that create pressure toward excellent outputs, not only
 filters against bad outputs. The case should make a strong model reveal taste,
@@ -498,6 +531,8 @@ def _agent_artifact_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = {
         "benchmark_case": dict(agent_artifact.get("benchmark_case", {})),
     }
+    if agent_artifact.get("runtime_requirements") is not None:
+        normalized["runtime_requirements"] = agent_artifact.get("runtime_requirements")
     if agent_artifact.get("environment_artifact") is not None:
         normalized["environment_artifact"] = agent_artifact.get("environment_artifact")
     return normalized
@@ -551,6 +586,11 @@ def _revision_patch_shape(domain: DomainConfig) -> dict[str, Any]:
 def _apply_revision_patch(candidate: CandidateSample, patch: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(patch, dict):
         raise ProviderError("revision patch must be a JSON object")
+    current_runtime_requirements = candidate.agent_artifact.runtime_requirements
+    if "runtime_requirements" in patch:
+        returned_runtime_requirements = patch.pop("runtime_requirements")
+        if returned_runtime_requirements != current_runtime_requirements:
+            raise ProviderError("revision patch cannot change runtime_requirements; revise files/metadata while preserving the seed runtime contract")
     unknown_keys = set(patch) - _REVISION_PATCH_KEYS
     if unknown_keys:
         raise ProviderError(f"revision patch contains unsupported top-level keys: {sorted(unknown_keys)}")
@@ -573,6 +613,7 @@ def _apply_revision_patch(candidate: CandidateSample, patch: dict[str, Any]) -> 
         if candidate.agent_artifact.environment_artifact is not None
         else None
     )
+    runtime_requirements = deepcopy(current_runtime_requirements)
 
     changed = False
     benchmark_updates = patch.get("benchmark_case_updates", {})
@@ -630,6 +671,7 @@ def _apply_revision_patch(candidate: CandidateSample, patch: dict[str, Any]) -> 
 
     return {
         "benchmark_case": benchmark_case,
+        "runtime_requirements": runtime_requirements,
         "environment_artifact": environment_artifact,
         **metadata,
     }
@@ -645,6 +687,14 @@ def _example_output_for_domain(domain: DomainConfig) -> dict[str, Any]:
         }
     }
     if domain.domain_id == "benchmark_code_debug":
+        agent_artifact["runtime_requirements"] = {
+            "kind": "filesystem_task",
+            "execution": {"mode": "task_image", "base_image": "python:3.11-slim", "os": "linux", "arch": "amd64"},
+            "language": {"name": "python", "version": "3.11+"},
+            "dependencies": {"policy": "stdlib_plus_runner", "packages": ["pytest"]},
+            "commands": {"test": "python -m pytest -q"},
+            "network": "disabled_during_eval",
+        }
         agent_artifact["environment_artifact"] = {
             "kind": "virtual_workspace",
             "payload": {
@@ -710,7 +760,11 @@ class SampleGenerator:
             + "\n\nDESIGN IMPLEMENTATION CONTRACT\n"
             "You are implementing a diagnostic design brief. The design brief decides the target ability, target environment, failure family, diagnostic pressure, shallow paths, and minimum depth. "
             "You may choose concrete artifact details, but you may not lower the ambition, simplify the causal structure, replace the failure family, or turn the brief into a smaller benchmark. "
-            "If implementation choices are needed, choose the strongest faithful artifact that preserves the design's evidence requirements."
+            "The design brief's runtime_requirements are binding: do not silently change language, runtime, OS assumptions, dependency policy, package requirements, network posture, or test command shape. "
+            "If the task needs files, services, tools, packages, or a runtime to execute, declare those requirements in agent_artifact.runtime_requirements and make the environment artifact consistent with them. "
+            "If implementation choices are needed, choose the strongest faithful artifact that preserves the design's evidence requirements; do not optimize for the smallest possible repository or easiest local patch. "
+            "Treat agent_artifact as the only material the evaluated agent will see; it must look like an ordinary task workspace with symptoms and constraints, not an answer key. "
+            "Treat judge_artifact as unseen evaluator metadata; put the intended diagnosis, causal explanation, expected repair boundaries, negative-control explanations, and gaming analysis there instead of in the prompt, source comments, tests, README, fixture names, or visible outputs."
         )
         payload: dict[str, Any] = {
             "design_brief": design.model_dump(mode="json"),
@@ -726,9 +780,11 @@ class SampleGenerator:
             "example_output": _example_output_for_domain(self.domain),
         }
         if retry_route_code is not None:
+            safe_subcodes = _generator_safe_retry_subcodes(retry_subcodes or [])
             payload["prior_generation_rejection"] = {
                 "route_code": retry_route_code.value,
-                "subcodes": _generator_safe_retry_subcodes(retry_subcodes or []),
+                "subcodes": safe_subcodes,
+                "retry_guidance": _generator_retry_guidance(safe_subcodes),
             }
         user = json.dumps(payload, sort_keys=True)
         payload, meta = self.client.complete_json(system=system, user=user, temperature=0.8)
@@ -802,6 +858,7 @@ class SampleGenerator:
             "revision_patch_rules": [
                 "Return only keys from required_revision_patch_shape.",
                 "Do not return benchmark_case, environment_artifact, score_x, ability_z, environment_y, or any complete candidate object at the top level.",
+                "Do not return runtime_requirements; the seed runtime contract is preserved automatically unless the adversary should have nuked the candidate.",
                 "Do not change ability_z or environment_y; if the candidate cannot be rescued within those, the adversary should have nuked it.",
                 "Every write_file content value must be the complete desired file content, not a diff or partial snippet.",
                 "Do not include raw output, ids, provenance, route codes, or stage metadata.",
@@ -816,6 +873,7 @@ class SampleGenerator:
             "revision_patch": payload,
             "agent_artifact": {
                 "benchmark_case": revised_fields["benchmark_case"],
+                "runtime_requirements": revised_fields["runtime_requirements"],
                 "environment_artifact": revised_fields["environment_artifact"],
             },
             "judge_artifact": {
@@ -1065,6 +1123,27 @@ _GENERATOR_RETRY_CODE_MAP = {
 }
 
 
+_GENERATOR_RETRY_GUIDANCE = {
+    "workspace_tests_do_not_reproduce_failure": (
+        "The starter workspace pytest command passed. Regenerate complete files so the unmodified starter code has at least one deterministic failing pytest assertion that demonstrates the target failure. "
+        "Do not make every test fail; include enough passing tests to show the harness is otherwise healthy."
+    ),
+    "workspace_test_command_failed": (
+        "The workspace test command did not cleanly collect and run to pytest assertions. Fix syntax, imports, pytest config, and file completeness so pytest executes normally."
+    ),
+    "answer_leak_in_candidate_materials": (
+        "Candidate-facing material leaked the answer. Remove answer-key prose from prompt, setup, README, comments, test names, fixture names, and visible outputs. "
+        "Move root cause, intended fix, causal explanation, and shallow-fix analysis into judge_artifact only."
+    ),
+    "weak_diagnostic_pressure": (
+        "The artifact did not create enough diagnostic pressure. Strengthen the actual workspace behavior with interacting components, misleading symptoms, and tests that distinguish shallow patches from causal fixes."
+    ),
+    "weak_proxy_validity": (
+        "The artifact was not a strong proxy for the claimed ability. Make the visible workspace itself require the target ability; do not rely on judge-facing prose to create the difficulty."
+    ),
+}
+
+
 def _generator_safe_retry_subcodes(subcodes: list[str]) -> list[str]:
     safe: list[str] = []
     for code in subcodes:
@@ -1072,6 +1151,34 @@ def _generator_safe_retry_subcodes(subcodes: list[str]) -> list[str]:
         if mapped not in safe:
             safe.append(mapped)
     return safe
+
+
+def _generator_retry_guidance(subcodes: list[str]) -> list[str]:
+    guidance: list[str] = []
+    for code in subcodes:
+        item = _GENERATOR_RETRY_GUIDANCE.get(code)
+        if item and item not in guidance:
+            guidance.append(item)
+    return guidance
+
+
+_DESIGN_RETRY_GUIDANCE = {
+    "missing_runtime_requirements": (
+        "Add runtime_requirements to every design. Executable filesystem tasks need kind=filesystem_task, execution, language, dependencies, commands.test, and network posture."
+    ),
+    "unsupported_runtime_requirements": (
+        "For executable filesystem tasks, set runtime_requirements.execution.mode to exactly 'task_image' or exactly 'container' and include execution.base_image. Do not return combined strings like 'task_image/container'."
+    ),
+}
+
+
+def _design_retry_guidance(subcodes: list[str]) -> list[str]:
+    guidance: list[str] = []
+    for code in subcodes:
+        item = _DESIGN_RETRY_GUIDANCE.get(code)
+        if item and item not in guidance:
+            guidance.append(item)
+    return guidance
 
 
 def _coerce_gate_verdict(

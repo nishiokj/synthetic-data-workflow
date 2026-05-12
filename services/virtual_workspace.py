@@ -61,7 +61,7 @@ class VirtualWorkspace:
             normalized_path = normalize_workspace_path(path, path_ref)
             if normalized_path in files:
                 raise VirtualWorkspaceError("duplicate_workspace_path", path_ref, "workspace file path is duplicated")
-            if not isinstance(content, str) or not content.strip():
+            if not isinstance(content, str) or (not content.strip() and not _allows_empty_file(normalized_path)):
                 raise VirtualWorkspaceError("invalid_workspace_file", content_ref, "workspace file content is missing")
             if looks_like_placeholder_file(content):
                 raise VirtualWorkspaceError("placeholder_workspace_file", content_ref, "workspace file content is placeholder text, not a materialized artifact")
@@ -93,7 +93,7 @@ class VirtualWorkspace:
 
     def write_file(self, path: str, content: str) -> None:
         normalized_path = normalize_workspace_path(path, "path")
-        if not isinstance(content, str) or not content.strip():
+        if not isinstance(content, str) or (not content.strip() and not _allows_empty_file(normalized_path)):
             raise VirtualWorkspaceError("invalid_workspace_file", "content", "workspace file content is missing")
         if looks_like_placeholder_file(content):
             raise VirtualWorkspaceError("placeholder_workspace_file", "content", "workspace file content is placeholder text")
@@ -125,6 +125,8 @@ def normalize_workspace_path(path: Any, ref: str) -> str:
 
 def looks_like_placeholder_file(content: str) -> bool:
     stripped = content.strip().lower()
+    if not stripped:
+        return False
     if looks_like_placeholder_text(stripped):
         return True
     return any(fragment in stripped for fragment in PLACEHOLDER_FRAGMENTS)
@@ -132,3 +134,7 @@ def looks_like_placeholder_file(content: str) -> bool:
 
 def looks_like_placeholder_text(value: str) -> bool:
     return value.strip().lower() in PLACEHOLDER_TEXTS
+
+
+def _allows_empty_file(path: str) -> bool:
+    return PurePosixPath(path).name == "__init__.py"

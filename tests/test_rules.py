@@ -5,12 +5,26 @@ from models import CandidateSample, DesignBrief, TaxonomyCell, Verdict
 from rules import deterministic_sample_verdict, validate_design_batch
 
 
+def _code_runtime_requirements(**overrides) -> dict:
+    values = {
+        "kind": "filesystem_task",
+        "execution": {"mode": "task_image", "base_image": "python:3.11-slim", "os": "linux", "arch": "amd64"},
+        "language": {"name": "python", "version": "3.11+"},
+        "dependencies": {"policy": "stdlib_plus_runner", "packages": ["pytest"]},
+        "commands": {"test": "python -m pytest -q"},
+        "network": "disabled_during_eval",
+    }
+    values.update(overrides)
+    return values
+
+
 def _candidate(**overrides) -> CandidateSample:
     cell = TaxonomyCell(case_type="proxy_strong", difficulty=3, scenario="adversarial")
     benchmark_case = overrides.pop(
         "benchmark_case",
         {"prompt": "Write a haiku that evokes layoffs as late autumn without saying work, loss, leaves, cold, or endings."},
     )
+    runtime_requirements = overrides.pop("runtime_requirements", "__missing__")
     environment_artifact = overrides.pop("environment_artifact", None)
     score_x = overrides.pop(
         "score_x",
@@ -37,6 +51,10 @@ def _candidate(**overrides) -> CandidateSample:
         "negative_controls": overrides.pop("negative_controls", [{"output": "dead leaves fall at work", "should_fail_because": "uses forbidden imagery and source domain"}]),
     }
     agent_artifact = {"benchmark_case": benchmark_case}
+    if runtime_requirements == "__missing__" and environment_artifact is not None:
+        runtime_requirements = _code_runtime_requirements()
+    if runtime_requirements != "__missing__" and runtime_requirements is not None:
+        agent_artifact["runtime_requirements"] = runtime_requirements
     if environment_artifact is not None:
         agent_artifact["environment_artifact"] = environment_artifact
     values = {
@@ -73,6 +91,7 @@ def _code_design(**overrides) -> DesignBrief:
             "actual_causal_region": "refund normalization before grouping by billing period",
             "required_depth": "requires tracing a transformed value across parser, normalizer, and summarizer",
         },
+        "runtime_requirements": _code_runtime_requirements(),
         "failure_mode_family": "misleading downstream aggregate caused by upstream normalization",
         "diagnostic_pressure": ["misleading output error with upstream normalization cause"],
         "why_weak_agents_fail": ["they patch the formatter or rounded total without preserving the period invariant"],
@@ -274,11 +293,46 @@ def test_code_domain_requires_materialized_workspace() -> None:
         "output_schema",
         "benchmark_case_schema",
         "environment_artifact",
+        "runtime_requirements",
         "answer_leakage",
         "taxonomy_cell",
         "benchmark_contract",
         "benchmark_oracle",
     ]
+
+
+def test_code_domain_requires_runtime_requirements_for_executable_workspace() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+
+    verdict, checks = deterministic_sample_verdict(
+        _candidate(
+            benchmark_case=_code_benchmark_case(),
+            environment_artifact=_code_environment_artifact(),
+            runtime_requirements=None,
+        ),
+        domain,
+    )
+
+    assert verdict.verdict == Verdict.REJECT
+    assert verdict.subcodes == ["missing_runtime_requirements"]
+    assert checks[4].check_id == "runtime_requirements"
+
+
+def test_code_domain_rejects_runtime_command_mismatch() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+
+    verdict, checks = deterministic_sample_verdict(
+        _candidate(
+            benchmark_case=_code_benchmark_case(),
+            environment_artifact=_code_environment_artifact(),
+            runtime_requirements=_code_runtime_requirements(commands={"test": "pytest -q"}),
+        ),
+        domain,
+    )
+
+    assert verdict.verdict == Verdict.REJECT
+    assert verdict.subcodes == ["runtime_contract_mismatch"]
+    assert checks[4].check_id == "runtime_requirements"
 
 
 def test_code_domain_rejects_placeholder_workspace_files() -> None:
@@ -342,6 +396,29 @@ def test_code_domain_rejects_workspace_tests_that_do_not_reproduce_failure() -> 
     assert verdict.subcodes == ["workspace_tests_do_not_reproduce_failure"]
 
 
+def test_code_domain_rejects_noisy_workspace_failures_across_many_files() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    benchmark_case = _code_benchmark_case()
+    environment_artifact = _code_environment_artifact(
+        files=[
+            {"path": "app.py", "content": "def value():\n    return 1\n"},
+            {"path": "tests/test_one.py", "content": "def test_one():\n    assert False\n"},
+            {"path": "tests/test_two.py", "content": "def test_two():\n    assert False\n"},
+            {"path": "tests/test_three.py", "content": "def test_three():\n    assert False\n"},
+        ],
+        commands={"test": "python -m pytest -q"},
+    )
+
+    verdict, checks = deterministic_sample_verdict(
+        _candidate(benchmark_case=benchmark_case, environment_artifact=environment_artifact),
+        domain,
+    )
+
+    assert verdict.verdict == Verdict.REJECT
+    assert verdict.subcodes == ["workspace_test_command_failed"]
+    assert checks[3].check_id == "environment_artifact"
+
+
 def test_code_domain_rejects_candidate_facing_answer_leaks() -> None:
     domain = load_domain("domains/benchmark_code_debug.yaml")
     benchmark_case = _code_benchmark_case()
@@ -368,7 +445,49 @@ def test_code_domain_rejects_candidate_facing_answer_leaks() -> None:
     assert verdict.verdict == Verdict.REJECT
     assert verdict.route_code.value == "reject_leakage"
     assert verdict.subcodes == ["answer_leak_in_candidate_materials"]
-    assert checks[4].check_id == "answer_leakage"
+    assert checks[5].check_id == "answer_leakage"
+
+
+def test_code_domain_allows_benign_candidate_facing_should_comments() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    benchmark_case = _code_benchmark_case()
+    environment_artifact = _code_environment_artifact(
+        files=[
+            {"path": "billing/parser.py", "content": "# Import adapters should provide mapping-like rows.\n\ndef parse_row(row):\n    return dict(row)\n"},
+            {
+                "path": "billing/reconcile.py",
+                "content": "from billing.parser import parse_row\n\n\ndef summarize(rows):\n    totals = {}\n    for row in rows:\n        parsed = parse_row(row)\n        amount = abs(parsed['amount'])\n        totals[parsed['period']] = totals.get(parsed['period'], 0) + amount\n    return totals\n",
+            },
+            {
+                "path": "tests/test_reconcile.py",
+                "content": "from billing.reconcile import summarize\n\n\ndef test_partial_refund_stays_in_original_period():\n    rows = [{'period': '2026-03', 'amount': 100}, {'period': '2026-03', 'amount': -25}]\n    assert summarize(rows) == {'2026-03': 75}\n",
+            },
+        ],
+        commands={"test": "python -m pytest -q"},
+    )
+
+    verdict, checks = deterministic_sample_verdict(
+        _candidate(benchmark_case=benchmark_case, environment_artifact=environment_artifact),
+        domain,
+    )
+
+    assert verdict.verdict == Verdict.ACCEPT
+    assert checks[5].check_id == "answer_leakage"
+
+
+def test_code_domain_allows_generic_root_cause_prompt() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    benchmark_case = _code_benchmark_case(
+        prompt="Run the failing tests, diagnose the root cause, and implement a minimal patch.",
+    )
+
+    verdict, checks = deterministic_sample_verdict(
+        _candidate(benchmark_case=benchmark_case, environment_artifact=_code_environment_artifact()),
+        domain,
+    )
+
+    assert verdict.verdict == Verdict.ACCEPT
+    assert checks[5].check_id == "answer_leakage"
 
 
 def test_code_design_requires_environment_premise_depth() -> None:
@@ -380,6 +499,17 @@ def test_code_design_requires_environment_premise_depth() -> None:
     assert verdict == Verdict.REJECT
     assert route_code.value == "reject_criteria_mismatch"
     assert subcodes == ["weak_diagnostic_pressure"]
+
+
+def test_code_design_requires_runtime_requirements() -> None:
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    design = _code_design(runtime_requirements={})
+
+    verdict, route_code, subcodes = validate_design_batch([design], domain)
+
+    assert verdict == Verdict.REJECT
+    assert route_code.value == "reject_criteria_mismatch"
+    assert subcodes == ["missing_runtime_requirements"]
 
 
 def test_code_design_rejects_toy_core_blueprint() -> None:

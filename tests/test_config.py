@@ -50,6 +50,21 @@ def test_reasoning_effort_defaults_to_medium(monkeypatch) -> None:
     assert config.models.reasoning_effort == "medium"
 
 
+def test_model_defaults_to_gpt_5_5(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    config = build_runtime_config(
+        domain_path="domains/benchmark_haiku.yaml",
+        target_stage="benchmark",
+        target_n=1,
+        seed=42,
+        run_id="test",
+        console_progress=False,
+    )
+
+    assert config.models.model == "gpt-5.5"
+
+
 def test_reasoning_effort_can_be_disabled_with_empty_env(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_REASONING_EFFORT", "")
 

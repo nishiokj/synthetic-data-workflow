@@ -61,6 +61,8 @@ subcodes:
   - missing_negative_control
   - missing_oracle
   - missing_workspace
+  - missing_runtime_requirements
+  - runtime_contract_mismatch
   - invalid_workspace_file
   - invalid_workspace_path
   - duplicate_workspace_path
@@ -70,6 +72,7 @@ subcodes:
   - workspace_test_command_failed
   - workspace_test_timeout
   - workspace_tests_do_not_reproduce_failure
+  - unsupported_runtime_requirements
   - answer_leak_in_candidate_materials
   - schema_violation
   - unknown_case_type
@@ -92,7 +95,9 @@ deterministic_rules:
   min_known_limit_items: 1
   execute_workspace_tests: true
   require_initial_test_failure: true
+  max_initial_failure_files: 2
   workspace_test_timeout_seconds: 10
+  require_runtime_requirements: true
 
 semantic_rules:
   - Judge the benchmark candidate as a proxy for a debugging ability, not as a polished programming exercise.
@@ -240,16 +245,29 @@ rubric_gate_rules:
 
 generator_guidance:
   goal: >
-    Produce a compact, realistic coding benchmark scenario for single-turn debug or
+    Produce a realistic, self-contained coding benchmark scenario for single-turn debug or
     explain-and-fix interactions. Prioritize the candidate-facing artifact: the
     project context, files, symptoms, constraints, and task prompt. The scenario
     should feel like a real internal tool, service, library, data workflow, or
     product bug rather than a Python kata. Do not settle for a toy unit-test repair
-    when the design asks for a hard benchmark; make the case compact enough to
-    understand but rich enough that success requires real engineering judgment.
+    when the design asks for a hard benchmark; make the case self-contained enough
+    to run locally but rich enough that success requires real engineering judgment.
     The candidate must include environment_artifact.kind = virtual_workspace with
-    concrete file paths, complete file contents, and a runnable pytest command.
-    Prefer "python -m pytest -q" for Python workspaces. Do not describe a
+    concrete file paths, complete file contents, and a runnable test command that
+    matches the seed's runtime_requirements.
+    The design seed must also define runtime_requirements: the runtime class,
+    language/runtime, dependency policy, executable commands, network posture, and
+    OS/architecture assumptions needed for the generated environment to run. Treat
+    those requirements as a binding environment contract. The sample generator may
+    materialize files and manifests that instantiate the contract, but must not
+    silently invent a different language, dependency stack, command shape, OS, or
+    runtime. Filesystem/executable coding tasks must declare an image-backed
+    execution mode such as task_image or container with a base image; the host
+    machine is not the portable benchmark contract. Prefer simple
+    standard-library-oriented tasks when that faithfully preserves the design, but
+    make runtime/dependency assumptions explicit rather than relying on the host
+    machine. Prefer "python -m pytest -q" when the seed explicitly chooses a
+    Python/pytest workspace. Do not describe a
     hypothetical repo layout in prose when the evaluated agent needs actual files
     to inspect.
     Candidate-facing files must look like ordinary production/test artifacts, not

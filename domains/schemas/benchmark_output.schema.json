@@ -15,6 +15,7 @@
       "additionalProperties": false,
       "properties": {
         "benchmark_case": {"$ref": "#/$defs/benchmark_case"},
+        "runtime_requirements": {"$ref": "#/$defs/runtime_requirements"},
         "environment_artifact": {"$ref": "#/$defs/environment_artifact"}
       }
     },
@@ -101,6 +102,19 @@
       "properties": {
         "kind": {"type": "string", "minLength": 1},
         "payload": {"type": "object"}
+      }
+    },
+    "runtime_requirements": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "execution": {"type": "object"},
+        "language": {"type": "object"},
+        "dependencies": {"type": "object"},
+        "commands": {"type": "object"},
+        "network": {"type": "string"}
       }
     },
     "score_x": {

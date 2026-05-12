@@ -3,7 +3,7 @@ from __future__ import annotations
 from langgraph.graph import END
 
 from config import build_runtime_config
-from models import AdversaryReport, CandidateSample, ContextPolicy, RouteCode, RoutingDecision, DesignBrief, StageKind, TaxonomyCell, Verdict
+from models import AdversaryReport, CandidateSample, ContextPolicy, RouteCode, RoutingDecision, SampleVerdict, DesignBrief, StageKind, TaxonomyCell, Verdict
 from pipeline import (
     PipelineRunner,
     after_adversary,
@@ -13,6 +13,7 @@ from pipeline import (
     after_validate_det,
     after_select_next_design,
     after_terminal_design,
+    after_gate_join,
     _graph_recursion_limit,
     route_from_decision,
 )
@@ -38,6 +39,14 @@ def _code_design(design_id: str, *, environment_premise: dict | None = None) -> 
             "tempting_wrong_fix": "round the exported total or patch the summary formatter",
             "actual_causal_region": "refund normalization before grouping by billing period",
             "required_depth": "requires tracing a transformed value across parser, normalizer, and summarizer",
+        },
+        runtime_requirements={
+            "kind": "filesystem_task",
+            "execution": {"mode": "task_image", "base_image": "python:3.11-slim", "os": "linux", "arch": "amd64"},
+            "language": {"name": "python", "version": "3.11+"},
+            "dependencies": {"policy": "stdlib_plus_runner", "packages": ["pytest"]},
+            "commands": {"test": "python -m pytest -q"},
+            "network": "disabled_during_eval",
         },
         failure_mode_family="misleading downstream aggregate caused by upstream normalization",
         diagnostic_pressure=["misleading output error with upstream normalization cause"],
@@ -296,7 +305,7 @@ def test_after_adversary_revise_still_routes_to_revision() -> None:
     assert after_adversary({"last_decision": None, "adversary_done": False}) == "revise_from_adversary"
 
 
-def test_adversary_pass_skips_revision_and_routes_to_gates(tmp_path, monkeypatch) -> None:
+def test_adversary_pass_skips_revision_and_routes_to_gates_as_caveats(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
     config = build_runtime_config(
         domain_path="domains/benchmark_code_debug.yaml",
@@ -332,3 +341,47 @@ def test_adversary_pass_skips_revision_and_routes_to_gates(tmp_path, monkeypatch
         "quality_gate",
         "rubric_gate",
     ]
+
+
+def test_join_gates_records_rejects_as_caveats_without_rerouting(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    config = build_runtime_config(
+        domain_path="domains/benchmark_code_debug.yaml",
+        target_stage="benchmark",
+        target_n=1,
+        seed=42,
+        run_id="gate-caveat",
+    )
+    config.data_dir = tmp_path / "data"
+    config.logs_dir = tmp_path / "logs"
+    runner = PipelineRunner(config)
+    design = _code_design("design-caveat")
+    candidate = _candidate(design)
+    quality = SampleVerdict(
+        candidate_id=candidate.id,
+        check_kind="quality",
+        verdict=Verdict.REJECT,
+        route_code=RouteCode.REJECT_SEMANTIC_MISMATCH,
+        subcodes=["answer_leak_in_candidate_materials"],
+    )
+    rubric = SampleVerdict(
+        candidate_id=candidate.id,
+        check_kind="rubric",
+        verdict=Verdict.ACCEPT,
+        route_code=RouteCode.ACCEPT,
+    )
+
+    update = runner.node_join_gates(
+        {
+            "candidate": candidate,
+            "quality_verdict": quality,
+            "rubric_verdict": rubric,
+            "gen_attempt": 0,
+        }
+    )
+
+    decision = update["last_decision"]
+    assert decision.verdict == Verdict.ACCEPT
+    assert decision.route_code == RouteCode.ACCEPT
+    assert decision.subcodes == ["quality_gate_rejected", "answer_leak_in_candidate_materials"]
+    assert after_gate_join(update) == "curate"

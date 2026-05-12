@@ -30,6 +30,7 @@ from services.corpus_index import CorpusIndex
 from services.coverage_ledger import CoverageLedger
 from services.rejection_archive import RejectionArchive
 from services.validation_ledger import ValidationLedger
+from services.workspace_export import WorkspaceExport
 
 
 class PipelineState(TypedDict, total=False):
@@ -156,6 +157,7 @@ class PipelineRunner:
         self.validation_ledger = ValidationLedger(self.writer)
         self.rejections = RejectionArchive(self.writer)
         self.corpus = CorpusIndex(config.data_dir, config.domain, self.client, config.run_id)
+        self.workspace_export = WorkspaceExport(logs_dir=config.logs_dir, data_dir=config.data_dir, run_id=config.run_id)
         self.designer = Designer(self.client, config.domain)
         self.design_auditor = DesignAuditor(self.client, config.domain)
         self.generator = SampleGenerator(self.client, config.domain)
@@ -525,6 +527,7 @@ class PipelineRunner:
             subcodes=det_verdict.subcodes,
         )
         self.rejections.append(candidate, decision)
+        self.workspace_export.export_rejection(candidate, decision)
         self._progress(
             "candidate",
             "rejected",
@@ -577,6 +580,7 @@ class PipelineRunner:
                 subcodes=["adversary_nuke"],
             )
             self.rejections.append(candidate, decision)
+            self.workspace_export.export_rejection(candidate, decision)
             self._progress(
                 "candidate",
                 "rejected",
@@ -706,6 +710,14 @@ class PipelineRunner:
                 "candidate": candidate.model_dump(mode="json"),
             }
         )
+        self.workspace_export.export_snapshot(
+            candidate,
+            phase=phase,
+            role=role,
+            retry_index=retry_index,
+            parent_candidate_id=parent_candidate_id,
+            adversary_report_id=adversary_report_id,
+        )
 
     def node_quality_gate(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
@@ -758,38 +770,21 @@ class PipelineRunner:
             quality=quality_verdict.verdict,
             rubric=rubric_verdict.verdict,
         )
-        verdict = quality_verdict if quality_verdict.verdict == Verdict.REJECT else rubric_verdict
         decision = route_after(
             run_id=self.config.run_id,
             from_stage=StageKind.VALIDATION,
-            verdict=verdict.verdict,
-            route_code=verdict.route_code,
+            verdict=Verdict.ACCEPT,
+            route_code=RouteCode.ACCEPT,
             retry_index=state["gen_attempt"],
             max_generation_retries=self.config.domain.max_generation_retries,
-            subcodes=verdict.subcodes,
+            subcodes=_gate_caveat_subcodes(quality_verdict, rubric_verdict),
         )
-        update: PipelineState = {"last_decision": decision}
-        if verdict.verdict == Verdict.REJECT:
-            self.rejections.append(candidate, decision)
-            self._progress(
-                "candidate",
-                "rejected",
-                **_candidate_progress(candidate),
-                route=decision.route_code,
-                codes=decision.subcodes,
-            )
-            if decision.terminal:
-                update["dropped_count"] = state["dropped_count"] + 1
-            else:
-                update["gen_attempt"] = state["gen_attempt"] + 1
-                update["gen_retry_route_code"] = decision.route_code
-                update["gen_retry_subcodes"] = decision.subcodes
-        return update
+        return {"last_decision": decision}
 
     def node_curate(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
-        quality_verdict = _require(state.get("quality_verdict"), "quality_verdict")
-        rubric_verdict = _require(state.get("rubric_verdict"), "rubric_verdict")
+        quality_verdict = state.get("quality_verdict") or _bypass_gate_verdict(candidate, "quality")
+        rubric_verdict = state.get("rubric_verdict") or _bypass_gate_verdict(candidate, "rubric")
         self._progress("curation", "start", candidate=candidate.id)
         certified = CertifiedSample(
             id=f"{candidate.id}-certified",
@@ -829,6 +824,7 @@ class PipelineRunner:
             subcodes=cur_verdict.subcodes,
         )
         if committed:
+            self.workspace_export.export_committed(committed)
             self.coverage.increment(candidate.cell)
             self._progress(
                 "candidate",
@@ -847,6 +843,7 @@ class PipelineRunner:
             }
 
         self.rejections.append(candidate, decision)
+        self.workspace_export.export_rejection(candidate, decision)
         self._progress(
             "candidate",
             "rejected",
@@ -895,6 +892,7 @@ class PipelineRunner:
             cost_usd=float(meta.get("cost_usd", 0.0)),
             reasoning_effort=None if meta.get("reasoning_effort") is None else str(meta.get("reasoning_effort")),
             text_normalization_replacements=int(meta.get("text_normalization_replacements", 0)),
+            error=None if meta.get("error") is None else str(meta.get("error")),
             verdict=verdict,
             route_code=route_code,
             subcodes=subcodes or [],
@@ -938,6 +936,31 @@ def _producer_context_policy(retry_route_code: RouteCode | None) -> ContextPolic
     if retry_route_code in {RouteCode.RETRY_INFRA, RouteCode.RETRY_PARSE, RouteCode.RETRY_PROVIDER_EMPTY}:
         return ContextPolicy.SAME_INPUT_RETRY
     return ContextPolicy.CRITERIA_PLUS_ROUTE_CODE
+
+
+def _bypass_gate_verdict(candidate: CandidateSample, check_kind: str) -> SampleVerdict:
+    return SampleVerdict(
+        candidate_id=candidate.id,
+        check_kind=check_kind,  # type: ignore[arg-type]
+        verdict=Verdict.ACCEPT,
+        route_code=RouteCode.ACCEPT,
+        subcodes=["adversary_only_test_bypass"],
+        rationale="Quality and rubric gates bypassed for the temporary adversary-only test run.",
+    )
+
+
+def _gate_caveat_subcodes(*verdicts: SampleVerdict) -> list[str]:
+    subcodes: list[str] = []
+    for verdict in verdicts:
+        if verdict.verdict != Verdict.REJECT:
+            continue
+        label = f"{verdict.check_kind}_gate_rejected"
+        if label not in subcodes:
+            subcodes.append(label)
+        for subcode in verdict.subcodes:
+            if subcode not in subcodes:
+                subcodes.append(subcode)
+    return subcodes
 
 
 def _graph_recursion_limit(config: RuntimeConfig) -> int:

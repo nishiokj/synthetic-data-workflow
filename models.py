@@ -94,6 +94,7 @@ class EnvironmentArtifact(BaseModel):
 
 class AgentArtifact(BaseModel):
     benchmark_case: dict[str, Any]
+    runtime_requirements: Optional[dict[str, Any]] = None
     environment_artifact: Optional[EnvironmentArtifact] = None
 
 
@@ -116,6 +117,7 @@ class DesignBrief(BaseModel):
     target_environment: str
     design_intent: str
     environment_premise: dict[str, Any] = Field(default_factory=dict)
+    runtime_requirements: dict[str, Any] = Field(default_factory=dict)
     environment_artifact_spec: dict[str, Any] = Field(default_factory=dict)
     failure_mode_family: str
     diagnostic_pressure: list[str] = Field(default_factory=list)
@@ -138,6 +140,7 @@ class DesignBrief(BaseModel):
         target_environment: str,
         design_intent: str,
         environment_premise: Optional[dict[str, Any]] = None,
+        runtime_requirements: Optional[dict[str, Any]] = None,
         environment_artifact_spec: Optional[dict[str, Any]] = None,
         failure_mode_family: str,
         diagnostic_pressure: list[str],
@@ -157,6 +160,7 @@ class DesignBrief(BaseModel):
                 "target_environment": target_environment,
                 "design_intent": design_intent,
                 "environment_premise": environment_premise or {},
+                "runtime_requirements": runtime_requirements or {},
                 "environment_artifact_spec": environment_artifact_spec or {},
                 "failure_mode_family": failure_mode_family,
                 "diagnostic_pressure": diagnostic_pressure,
@@ -176,6 +180,7 @@ class DesignBrief(BaseModel):
             target_environment=target_environment,
             design_intent=design_intent,
             environment_premise=environment_premise or {},
+            runtime_requirements=runtime_requirements or {},
             environment_artifact_spec=environment_artifact_spec or {},
             failure_mode_family=failure_mode_family,
             diagnostic_pressure=diagnostic_pressure,
@@ -304,6 +309,7 @@ class StageRecord(BaseModel):
     cost_usd: float = 0.0
     reasoning_effort: Optional[str] = None
     text_normalization_replacements: int = 0
+    error: Optional[str] = None
     verdict: Verdict
     route_code: RouteCode
     subcodes: list[str] = Field(default_factory=list)

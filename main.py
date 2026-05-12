@@ -67,6 +67,7 @@ def main() -> int:
     print(f"committed={summary['committed']}")
     print(f"dropped={summary['dropped']}")
     print(f"corpus=data/corpus/benchmark/{summary['run_id']}.jsonl")
+    print(f"materialized=data/materialized/benchmark/{summary['run_id']}")
     print(f"logs=logs/{summary['run_id']}/stage_records.jsonl")
     return 0 if summary["committed"] >= args.target_n else 1
 
@@ -75,6 +76,7 @@ def _existing_run_artifacts(run_id: str) -> list[Path]:
     paths = [
         Path("logs") / run_id,
         Path("data") / "corpus" / "benchmark" / f"{run_id}.jsonl",
+        Path("data") / "materialized" / "benchmark" / run_id,
     ]
     return [path for path in paths if path.exists()]
 
