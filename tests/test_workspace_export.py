@@ -77,7 +77,22 @@ def test_workspace_export_writes_candidate_files_and_metadata(tmp_path) -> None:
     assert task_manifest["build"]["base_image"] == "python:3.11-slim"
     dockerfile = (root / "task" / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM python:3.11-slim" in dockerfile
+    assert "RUN python -m pip install --no-cache-dir pytest" in dockerfile
     assert 'CMD ["sh", "-lc", "python -m pytest -q"]' in dockerfile
+
+
+def test_workspace_export_installs_python_pinned_manifest(tmp_path) -> None:
+    candidate = _candidate()
+    runtime = candidate.agent_artifact.runtime_requirements
+    runtime["dependencies"] = {"policy": "pinned_manifest", "manifest_path": "requirements.txt"}
+    payload = candidate.agent_artifact.environment_artifact.payload
+    payload["files"].append({"path": "requirements.txt", "content": "pytest==9.0.2\n"})
+    exporter = WorkspaceExport(logs_dir=tmp_path / "logs", data_dir=tmp_path / "data", run_id="run")
+
+    root = exporter.export_snapshot(candidate, phase="generated", role="generate", retry_index=0)
+
+    dockerfile = (root / "task" / "Dockerfile").read_text(encoding="utf-8")
+    assert "RUN python -m pip install --no-cache-dir -r requirements.txt" in dockerfile
 
 
 def test_workspace_export_preserves_raw_files_for_invalid_workspace(tmp_path) -> None:

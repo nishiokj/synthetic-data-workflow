@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agents import OpenAIClient, ProviderError
+from agents import ModelClient, ProviderError
 from config import ModelConfig, load_env_file
 from models import stable_hash, utc_now_iso
 from services.virtual_workspace import VirtualWorkspace
@@ -20,6 +20,7 @@ def main() -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--provider", default=None)
     parser.add_argument("--base-url", default=None)
+    parser.add_argument("--auth-file", default=None, help="Provider auth file path. Codex defaults to ~/.codex/auth.json.")
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--index", type=int, default=None, help="0-based corpus row to run. Defaults to the last rows.")
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -39,11 +40,12 @@ def main() -> int:
         output_path.unlink()
 
     load_env_file()
-    client = OpenAIClient(
+    client = ModelClient(
         ModelConfig(
             provider=args.provider or "openai",
-            model=args.model or "gpt-5-mini",
-            base_url=args.base_url or "https://api.openai.com/v1",
+            model=args.model or "gpt-5.5",
+            base_url=args.base_url,
+            auth_file=Path(args.auth_file).expanduser() if args.auth_file else None,
         )
     )
 

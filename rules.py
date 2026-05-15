@@ -15,6 +15,7 @@ from models import (
     Verdict,
 )
 from services.environment_validation import validate_environment_artifact
+from services.workspace_executor import validate_supported_container_runtime
 from text_hygiene import find_disallowed_text
 
 
@@ -99,7 +100,12 @@ def _validate_design_environment(design: Any, domain: DomainConfig) -> tuple[Ver
     return None
 
 
-def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfig) -> tuple[SampleVerdict, list[CheckResult]]:
+def deterministic_sample_verdict(
+    candidate: CandidateSample,
+    domain: DomainConfig,
+    *,
+    workspace_validation_executor: str | None = None,
+) -> tuple[SampleVerdict, list[CheckResult]]:
     checks = [
         _text_hygiene_check(candidate),
         _output_schema_check(candidate, domain),
@@ -110,7 +116,14 @@ def deterministic_sample_verdict(candidate: CandidateSample, domain: DomainConfi
     ]
     if domain.domain_id == "benchmark_code_debug":
         checks.insert(3, _runtime_requirements_check(candidate, domain))
-        checks.insert(3, validate_environment_artifact(candidate, domain))
+        checks.insert(
+            3,
+            validate_environment_artifact(
+                candidate,
+                domain,
+                workspace_validation_executor=workspace_validation_executor,
+            ),
+        )
         checks.insert(5, _candidate_facing_answer_leak_check(candidate))
     failed = [check for check in checks if not check.passed]
     if not failed:
@@ -176,13 +189,8 @@ def _runtime_requirements_check(candidate: CandidateSample, domain: DomainConfig
     if runtime.get("kind") != "filesystem_task":
         return CheckResult(check_id="runtime_requirements", passed=True)
 
-    execution = runtime.get("execution")
-    if (
-        not isinstance(execution, dict)
-        or execution.get("mode") not in {"task_image", "container"}
-        or not isinstance(execution.get("base_image"), str)
-        or not execution["base_image"].strip()
-    ):
+    runtime_error = validate_supported_container_runtime(runtime)
+    if runtime_error is not None:
         return CheckResult(
             check_id="runtime_requirements",
             passed=False,
@@ -192,7 +200,7 @@ def _runtime_requirements_check(candidate: CandidateSample, domain: DomainConfig
                 EvidenceRef(
                     source="deterministic_rule",
                     path="agent_artifact.runtime_requirements.execution",
-                    value="filesystem_task benchmarks must declare execution.mode task_image/container and a base_image",
+                    value=runtime_error,
                 )
             ],
         )

@@ -163,7 +163,8 @@ def _task_image_recipe(runtime_requirements: dict[str, Any] | None, workspace_co
         commands.update({str(key): str(value) for key, value in runtime_commands.items()})
 
     test_command = commands.get("test", "")
-    install_commands = _command_list(commands.get("install"))
+    install_commands = _dependency_install_commands(runtime_requirements)
+    install_commands.extend(_command_list(commands.get("install")))
     dockerfile_lines = [
         f"FROM {base_image.strip()}",
         "WORKDIR /workspace",
@@ -197,3 +198,52 @@ def _command_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item).strip()]
     return []
+
+
+def _dependency_install_commands(runtime_requirements: dict[str, Any]) -> list[str]:
+    dependencies = runtime_requirements.get("dependencies")
+    if not isinstance(dependencies, dict):
+        return []
+
+    policy = dependencies.get("policy")
+    if not _is_python_runtime(runtime_requirements):
+        return []
+
+    if policy == "stdlib_plus_runner":
+        packages = _package_list(dependencies.get("packages"))
+        if not packages:
+            return []
+        return [f"python -m pip install --no-cache-dir {' '.join(packages)}"]
+
+    if policy == "pinned_manifest":
+        manifest_path = dependencies.get("manifest_path")
+        if isinstance(manifest_path, str) and manifest_path.strip():
+            return [f"python -m pip install --no-cache-dir -r {manifest_path.strip()}"]
+
+    return []
+
+
+def _package_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    packages: list[str] = []
+    for item in value:
+        package = str(item).strip()
+        if package:
+            packages.append(package)
+    return packages
+
+
+def _is_python_runtime(runtime_requirements: dict[str, Any]) -> bool:
+    language = runtime_requirements.get("language")
+    language_name = language.get("name") if isinstance(language, dict) else None
+    if language_name == "python":
+        return True
+    execution = runtime_requirements.get("execution")
+    base_image = execution.get("base_image") if isinstance(execution, dict) else None
+    if isinstance(base_image, str) and base_image.strip().startswith("python:"):
+        return True
+    commands = runtime_requirements.get("commands")
+    if isinstance(commands, dict):
+        return any(str(command).strip().startswith(("python ", "python3 ", "pytest")) for command in commands.values())
+    return False

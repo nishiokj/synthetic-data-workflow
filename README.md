@@ -119,7 +119,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY=...
-# optional: export OPENAI_REASONING_EFFORT=medium
+# optional: export MODEL_PROVIDER=openai
+# optional: export MODEL_NAME=gpt-5.5
+# optional: export MODEL_REASONING_EFFORT=medium
 pytest
 python3 main.py --domain domains/benchmark_haiku.yaml --target-stage benchmark --target-n 5 --seed 42 --run-id demo
 python3 analyze.py --run-id demo
@@ -175,11 +177,31 @@ tools or credentials the pipeline uses must be available at runtime.
 
 ## Environment
 
-The live POC uses real provider calls for LLM and embedding stages. You can put
-credentials in `.env` at the repo root:
+The live POC uses real provider calls for LLM stages. You can put credentials
+and model settings in `.env` at the repo root:
 
 ```text
 OPENAI_API_KEY=sk-...
+MODEL_PROVIDER=openai
+MODEL_NAME=gpt-5.5
+MODEL_REASONING_EFFORT=medium
+EMBEDDING_PROVIDER=local
+EMBEDDING_MODEL=local-hash-embedding
+```
+
+By default, embeddings use a local deterministic hash vector for novelty checks.
+Set `EMBEDDING_PROVIDER=openai` explicitly only when you want curation to call a
+remote embedding API.
+
+For Codex subscription auth, use the Codex provider and either rely on the
+default auth file at `~/.codex/auth.json` or pass an explicit path:
+
+```bash
+MODEL_PROVIDER=codex MODEL_NAME=gpt-5.5 python3 main.py \
+  --domain domains/benchmark_haiku.yaml \
+  --target-n 1 \
+  --run-id codex-demo \
+  --auth-file ~/.codex/auth.json
 ```
 
 See `.env.example` for optional model and base URL overrides. Values already

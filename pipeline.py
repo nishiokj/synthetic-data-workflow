@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from agents import Adversary, OpenAIClient, DesignAuditor, ProviderError, QualityGate, RubricGate, SampleGenerator, Designer
+from agents import Adversary, ModelClient, DesignAuditor, ProviderError, QualityGate, RubricGate, SampleGenerator, Designer
 from config import RuntimeConfig
 from models import (
     AgentRole,
@@ -14,6 +15,9 @@ from models import (
     CheckResult,
     ContextPolicy,
     DesignVerdict,
+    GenerationEnvelope,
+    GenerationPipelineInput,
+    GenerationPipelineResult,
     RouteCode,
     RoutingDecision,
     SampleVerdict,
@@ -23,7 +27,7 @@ from models import (
     Verdict,
     stable_hash,
 )
-from observability import StageLogWriter, emit_event
+from observability import StageLogWriter, emit_event, trace_hash
 from router import route_after
 from rules import deterministic_sample_verdict, validate_design_batch
 from services.corpus_index import CorpusIndex
@@ -42,6 +46,7 @@ class PipelineState(TypedDict, total=False):
     design_retry_subcodes: list[str]
     designs_queue: list[DesignBrief]
     design: DesignBrief | None
+    generation_envelope: GenerationEnvelope | None
     gen_attempt: int
     gen_retry_route_code: RouteCode | None
     gen_retry_subcodes: list[str]
@@ -53,6 +58,7 @@ class PipelineState(TypedDict, total=False):
     quality_verdict: SampleVerdict | None
     rubric_verdict: SampleVerdict | None
     last_decision: RoutingDecision | None
+    last_candidate_id: str | None
     committed_count: int
     dropped_count: int
 
@@ -116,7 +122,7 @@ def after_validate_det(state: PipelineState) -> str | list[str]:
     if state["det_accepted"]:
         if not state.get("adversary_done"):
             return "adversary"
-        return ["quality_gate", "rubric_gate"]
+        return "quality_gate"
     decision = state["last_decision"]
     if decision and decision.terminal:
         return after_terminal_design(state)
@@ -137,7 +143,7 @@ def after_adversary(state: PipelineState) -> str | list[str]:
             return after_terminal_design(state)
         return route_from_decision(state)
     if state.get("adversary_done"):
-        return ["quality_gate", "rubric_gate"]
+        return "quality_gate"
     return "revise_from_adversary"
 
 
@@ -148,10 +154,39 @@ def after_gate_join(state: PipelineState) -> str:
     return route_from_decision(state)
 
 
+def after_generate_entrypoint(state: PipelineState) -> str:
+    return route_from_decision(state)
+
+
+def after_validate_det_entrypoint(state: PipelineState) -> str | list[str]:
+    if state["det_accepted"]:
+        if not state.get("adversary_done"):
+            return "adversary"
+        return "quality_gate"
+    return route_from_decision(state)
+
+
+def after_adversary_entrypoint(state: PipelineState) -> str | list[str]:
+    decision = state.get("last_decision")
+    if decision:
+        return route_from_decision(state)
+    if state.get("adversary_done"):
+        return "quality_gate"
+    return "revise_from_adversary"
+
+
+def after_gate_join_entrypoint(state: PipelineState) -> str:
+    return route_from_decision(state)
+
+
+def after_curate_entrypoint(state: PipelineState) -> str:
+    return END
+
+
 class PipelineRunner:
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
-        self.client = OpenAIClient(config.models)
+        self.client = ModelClient(config.models)
         self.writer = StageLogWriter(config.logs_dir, config.run_id)
         self.coverage = CoverageLedger(config.data_dir, config.domain)
         self.validation_ledger = ValidationLedger(self.writer)
@@ -160,11 +195,25 @@ class PipelineRunner:
         self.workspace_export = WorkspaceExport(logs_dir=config.logs_dir, data_dir=config.data_dir, run_id=config.run_id)
         self.designer = Designer(self.client, config.domain)
         self.design_auditor = DesignAuditor(self.client, config.domain)
-        self.generator = SampleGenerator(self.client, config.domain)
+        self.generator = SampleGenerator(
+            self.client,
+            config.domain,
+            system_prompt_override=config.generator_system_prompt_override,
+            system_prompt_append=config.generator_system_prompt_append,
+        )
         self.adversary = Adversary(self.client, config.domain)
         self.quality_gate = QualityGate(self.client, config.domain)
         self.rubric_gate = RubricGate(self.client, config.domain)
+        self.quality_gate_ensemble = [
+            (f"gate_ensemble_{index}", QualityGate(ModelClient(model_config), config.domain))
+            for index, model_config in enumerate(config.gate_ensemble_models, start=1)
+        ]
+        self.rubric_gate_ensemble = [
+            (f"gate_ensemble_{index}", RubricGate(ModelClient(model_config), config.domain))
+            for index, model_config in enumerate(config.gate_ensemble_models, start=1)
+        ]
         self.graph = self._build_graph().compile()
+        self.generation_graph = self._build_generation_graph().compile()
 
     def _build_graph(self) -> StateGraph:
         graph = StateGraph(PipelineState)
@@ -189,9 +238,31 @@ class PipelineRunner:
         graph.add_conditional_edges("validate_det", after_validate_det)
         graph.add_conditional_edges("adversary", after_adversary)
         graph.add_edge("revise_from_adversary", "validate_det")
-        graph.add_edge(["quality_gate", "rubric_gate"], "join_gates")
+        graph.add_edge("quality_gate", "rubric_gate")
+        graph.add_edge("rubric_gate", "join_gates")
         graph.add_conditional_edges("join_gates", after_gate_join)
         graph.add_conditional_edges("curate", after_curate)
+        return graph
+
+    def _build_generation_graph(self) -> StateGraph:
+        graph = StateGraph(PipelineState)
+        graph.add_node("generate", self.node_generate)
+        graph.add_node("validate_det", self.node_validate_det)
+        graph.add_node("adversary", self.node_adversary)
+        graph.add_node("revise_from_adversary", self.node_revise_from_adversary)
+        graph.add_node("quality_gate", self.node_quality_gate)
+        graph.add_node("rubric_gate", self.node_rubric_gate)
+        graph.add_node("join_gates", self.node_join_gates)
+        graph.add_node("curate", self.node_curate)
+        graph.add_edge(START, "generate")
+        graph.add_conditional_edges("generate", after_generate_entrypoint)
+        graph.add_conditional_edges("validate_det", after_validate_det_entrypoint)
+        graph.add_conditional_edges("adversary", after_adversary_entrypoint)
+        graph.add_edge("revise_from_adversary", "validate_det")
+        graph.add_edge("quality_gate", "rubric_gate")
+        graph.add_edge("rubric_gate", "join_gates")
+        graph.add_conditional_edges("join_gates", after_gate_join_entrypoint)
+        graph.add_conditional_edges("curate", after_curate_entrypoint)
         return graph
 
     def run(self) -> dict[str, Any]:
@@ -225,6 +296,40 @@ class PipelineRunner:
             "dropped": final["dropped_count"],
         }
 
+    def run_from_generation(self, request: GenerationPipelineInput) -> GenerationPipelineResult:
+        envelope = request.envelope
+        self._progress(
+            "run",
+            "start_from_generation",
+            envelope=envelope.id,
+            design=envelope.design.id,
+            model=self.config.models.model,
+            graph_limit=_graph_recursion_limit(self.config),
+        )
+        initial: PipelineState = {
+            "run_id": self.config.run_id,
+            "target_n": 1,
+            "max_design_retries": 0,
+            "design_round": 0,
+            "design_retry_subcodes": [],
+            "designs_queue": [],
+            "design": envelope.design,
+            "generation_envelope": envelope,
+            "gen_attempt": 0,
+            "gen_retry_subcodes": [],
+            "det_checks": [],
+            "det_accepted": False,
+            "adversary_done": False,
+            "committed_count": 0,
+            "dropped_count": 0,
+            "last_candidate_id": None,
+        }
+        final = self.generation_graph.invoke(initial, config={"recursion_limit": _graph_recursion_limit(self.config)})
+        result = self._generation_result(envelope, final, request.output_dir)
+        if request.output_dir is not None:
+            _write_generation_result(result)
+        return result
+
     def node_design(self, state: PipelineState) -> PipelineState:
         design_round = state["design_round"] + 1
         count = max(1, self.config.target_n * 2)
@@ -235,10 +340,18 @@ class PipelineRunner:
             requested_designs=count,
             retry=state.get("design_retry_route_code"),
         )
+        coverage_snapshot = self.coverage.snapshot()
+        stage_input = {
+            "run_id": f"{self.config.run_id}-r{design_round}",
+            "target_n": count,
+            "coverage_snapshot": coverage_snapshot,
+            "retry_route_code": state.get("design_retry_route_code"),
+            "retry_subcodes": state.get("design_retry_subcodes"),
+        }
         designs, meta = self.designer.design(
             run_id=f"{self.config.run_id}-r{design_round}",
             target_n=count,
-            coverage_snapshot=self.coverage.snapshot(),
+            coverage_snapshot=coverage_snapshot,
             retry_route_code=state.get("design_retry_route_code"),
             retry_subcodes=state.get("design_retry_subcodes"),
         )
@@ -255,6 +368,8 @@ class PipelineRunner:
             context_policy=_producer_context_policy(state.get("design_retry_route_code")),
             meta=meta,
             retry_index=design_round - 1,
+            stage_input=stage_input,
+            stage_output={"designs": designs},
         )
         return {
             "design_round": design_round,
@@ -302,6 +417,15 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=_local_meta(),
             retry_index=retry_index,
+            stage_input={"designs": designs},
+            stage_output={
+                "accepted_designs": accepted_designs,
+                "rejected_designs": [
+                    {"design": rejected_design, "route_code": rejected_route_code, "subcodes": rejected_subcodes}
+                    for rejected_design, rejected_route_code, rejected_subcodes in rejected_designs
+                ],
+                "decision": decision,
+            },
         )
         update: PipelineState = {"last_decision": decision, "designs_queue": accepted_designs}
         for rejected_design, rejected_route_code, rejected_subcodes in rejected_designs:
@@ -399,6 +523,8 @@ class PipelineRunner:
             subcodes=design_verdict.subcodes,
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=meta,
+            stage_input={"design": design},
+            stage_output={"design_verdict": design_verdict, "decision": decision},
         )
         update: PipelineState = {"last_decision": decision}
         if design_verdict.verdict == Verdict.REJECT:
@@ -417,9 +543,17 @@ class PipelineRunner:
             retry=state.get("gen_retry_route_code"),
         )
         try:
-            candidate, gen_meta = self.generator.generate(
+            envelope = state.get("generation_envelope") or GenerationEnvelope.from_design(design)
+            self._append_generation_envelope(
+                envelope,
+                role="generate_candidate_sample",
+                retry_index=retry_index,
+                retry_route_code=state.get("gen_retry_route_code"),
+                retry_subcodes=state.get("gen_retry_subcodes"),
+            )
+            candidate, gen_meta = self.generator.generate_from_envelope(
                 run_id=self.config.run_id,
-                design=design,
+                envelope=envelope,
                 attempt=retry_index + 1,
                 retry_route_code=state.get("gen_retry_route_code"),
                 retry_subcodes=state.get("gen_retry_subcodes"),
@@ -447,6 +581,13 @@ class PipelineRunner:
                 context_policy=_producer_context_policy(state.get("gen_retry_route_code")),
                 meta=_local_meta(error=str(exc)),
                 retry_index=retry_index,
+                stage_input={
+                    "envelope": envelope,
+                    "attempt": retry_index + 1,
+                    "retry_route_code": state.get("gen_retry_route_code"),
+                    "retry_subcodes": state.get("gen_retry_subcodes"),
+                },
+                stage_output={"error": str(exc), "decision": decision},
             )
             update: PipelineState = {"last_decision": decision}
             if decision.terminal:
@@ -476,6 +617,13 @@ class PipelineRunner:
             context_policy=_producer_context_policy(state.get("gen_retry_route_code")),
             meta=gen_meta,
             retry_index=retry_index,
+            stage_input={
+                "envelope": envelope,
+                "attempt": retry_index + 1,
+                "retry_route_code": state.get("gen_retry_route_code"),
+                "retry_subcodes": state.get("gen_retry_subcodes"),
+            },
+            stage_output={"candidate": candidate, "decision": decision},
         )
         self._append_candidate_snapshot(
             candidate,
@@ -494,12 +642,17 @@ class PipelineRunner:
             "last_decision": decision,
             "gen_retry_route_code": None,
             "gen_retry_subcodes": [],
+            "last_candidate_id": candidate.id,
         }
 
     def node_validate_det(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
         self._progress("validation_det", "start", candidate=candidate.id)
-        det_verdict, checks = deterministic_sample_verdict(candidate, self.config.domain)
+        det_verdict, checks = deterministic_sample_verdict(
+            candidate,
+            self.config.domain,
+            workspace_validation_executor=self.config.workspace_validation_executor,
+        )
         self.validation_ledger.append(det_verdict)
         self._record(
             stage_kind=StageKind.VALIDATION,
@@ -513,6 +666,8 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=_local_meta(),
             retry_index=state["gen_attempt"],
+            stage_input={"candidate": candidate},
+            stage_output={"deterministic_verdict": det_verdict, "checks": checks},
         )
         if det_verdict.verdict == Verdict.ACCEPT:
             return {"det_checks": checks, "det_accepted": True, "last_decision": None}
@@ -561,6 +716,8 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=meta,
             retry_index=state["gen_attempt"],
+            stage_input={"design": design, "candidate": candidate},
+            stage_output={"adversary_report": report},
         )
         self._progress(
             "adversary",
@@ -647,6 +804,8 @@ class PipelineRunner:
                 context_policy=ContextPolicy.CRITERIA_PLUS_ROUTE_CODE,
                 meta=_local_meta(error=str(exc)),
                 retry_index=state["gen_attempt"],
+                stage_input={"design": design, "candidate": candidate, "adversary_report": report, "attempt": attempt},
+                stage_output={"error": str(exc), "decision": decision},
             )
             update: PipelineState = {"last_decision": decision, "adversary_done": True}
             if decision.terminal:
@@ -668,6 +827,8 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_PLUS_ROUTE_CODE,
             meta=meta,
             retry_index=state["gen_attempt"],
+            stage_input={"design": design, "candidate": candidate, "adversary_report": report, "attempt": attempt},
+            stage_output={"candidate": revised},
         )
         self._append_candidate_snapshot(
             revised,
@@ -685,6 +846,7 @@ class PipelineRunner:
             "quality_verdict": None,
             "rubric_verdict": None,
             "last_decision": None,
+            "last_candidate_id": revised.id,
         }
 
     def _append_candidate_snapshot(
@@ -719,10 +881,47 @@ class PipelineRunner:
             adversary_report_id=adversary_report_id,
         )
 
+    def _append_generation_envelope(
+        self,
+        envelope: GenerationEnvelope,
+        *,
+        role: str,
+        retry_index: int,
+        retry_route_code: RouteCode | None,
+        retry_subcodes: list[str] | None,
+    ) -> None:
+        self.writer.append_generation_envelope(
+            {
+                "run_id": self.config.run_id,
+                "role": role,
+                "envelope_id": envelope.id,
+                "design_id": envelope.design.id,
+                "retry_index": retry_index,
+                "retry_route_code": retry_route_code,
+                "retry_subcodes": retry_subcodes or [],
+                "envelope": envelope.model_dump(mode="json"),
+            }
+        )
+
     def node_quality_gate(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
         self._progress("quality_gate", "start", candidate=candidate.id)
+        self._progress(
+            "quality_gate",
+            "provider_start",
+            candidate=candidate.id,
+            model=self.config.models.model,
+            provider=self.config.models.provider,
+        )
         quality_verdict, quality_meta = self.quality_gate.validate(candidate)
+        self._progress(
+            "quality_gate",
+            "provider_end",
+            candidate=candidate.id,
+            model=quality_meta.get("model"),
+            provider=quality_meta.get("provider"),
+            latency=f"{quality_meta.get('latency_ms', 0)}ms",
+        )
         self.validation_ledger.append(quality_verdict)
         self._record(
             stage_kind=StageKind.VALIDATION,
@@ -736,13 +935,36 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=quality_meta,
             retry_index=state["gen_attempt"],
+            stage_input={"candidate": candidate},
+            stage_output={"quality_verdict": quality_verdict},
+        )
+        self._run_gate_ensemble(
+            gate_kind="quality",
+            gates=self.quality_gate_ensemble,
+            candidate=candidate,
+            retry_index=state["gen_attempt"],
         )
         return {"quality_verdict": quality_verdict}
 
     def node_rubric_gate(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
         self._progress("rubric_gate", "start", candidate=candidate.id)
+        self._progress(
+            "rubric_gate",
+            "provider_start",
+            candidate=candidate.id,
+            model=self.config.models.model,
+            provider=self.config.models.provider,
+        )
         rubric_verdict, rubric_meta = self.rubric_gate.validate(candidate)
+        self._progress(
+            "rubric_gate",
+            "provider_end",
+            candidate=candidate.id,
+            model=rubric_meta.get("model"),
+            provider=rubric_meta.get("provider"),
+            latency=f"{rubric_meta.get('latency_ms', 0)}ms",
+        )
         self.validation_ledger.append(rubric_verdict)
         self._record(
             stage_kind=StageKind.VALIDATION,
@@ -756,8 +978,45 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=rubric_meta,
             retry_index=state["gen_attempt"],
+            stage_input={"candidate": candidate},
+            stage_output={"rubric_verdict": rubric_verdict},
+        )
+        self._run_gate_ensemble(
+            gate_kind="rubric",
+            gates=self.rubric_gate_ensemble,
+            candidate=candidate,
+            retry_index=state["gen_attempt"],
         )
         return {"rubric_verdict": rubric_verdict}
+
+    def _run_gate_ensemble(
+        self,
+        *,
+        gate_kind: str,
+        gates: list[tuple[str, QualityGate | RubricGate]],
+        candidate: CandidateSample,
+        retry_index: int,
+    ) -> None:
+        for gate_id, gate in gates:
+            self._progress(f"{gate_kind}_gate:{gate_id}", "start", candidate=candidate.id)
+            verdict, meta = gate.validate(candidate)
+            role = f"{gate_kind}_gate_candidate_ensemble"
+            agent_role = AgentRole.QUALITY_GATE if gate_kind == "quality" else AgentRole.RUBRIC_GATE
+            self._record(
+                stage_kind=StageKind.VALIDATION,
+                role=role,
+                agent_role=agent_role,
+                artifact_id=f"{candidate.id}-{gate_kind}-verdict-{gate_id}",
+                parent_artifact_id=candidate.id,
+                verdict=verdict.verdict,
+                route_code=verdict.route_code,
+                subcodes=verdict.subcodes,
+                context_policy=ContextPolicy.CRITERIA_ONLY,
+                meta={**meta, "gate_ensemble_id": gate_id},
+                retry_index=retry_index,
+                stage_input={"candidate": candidate, "gate_ensemble_id": gate_id},
+                stage_output={f"{gate_kind}_verdict": verdict, "gate_ensemble_id": gate_id},
+            )
 
     def node_join_gates(self, state: PipelineState) -> PipelineState:
         candidate = _require(state.get("candidate"), "candidate")
@@ -778,6 +1037,25 @@ class PipelineRunner:
             retry_index=state["gen_attempt"],
             max_generation_retries=self.config.domain.max_generation_retries,
             subcodes=_gate_caveat_subcodes(quality_verdict, rubric_verdict),
+        )
+        self._record(
+            stage_kind=StageKind.VALIDATION,
+            role="join_quality_rubric_gates",
+            agent_role=None,
+            artifact_id=f"{candidate.id}-gate-join",
+            parent_artifact_id=candidate.id,
+            verdict=decision.verdict,
+            route_code=decision.route_code,
+            subcodes=decision.subcodes,
+            context_policy=ContextPolicy.CRITERIA_ONLY,
+            meta=_local_meta(),
+            retry_index=state["gen_attempt"],
+            stage_input={
+                "candidate": candidate,
+                "quality_verdict": quality_verdict,
+                "rubric_verdict": rubric_verdict,
+            },
+            stage_output={"decision": decision},
         )
         return {"last_decision": decision}
 
@@ -802,6 +1080,14 @@ class PipelineRunner:
             run_id=self.config.run_id,
         )
         self.validation_ledger.append(cur_verdict)
+        decision = route_after(
+            run_id=self.config.run_id,
+            from_stage=StageKind.CURATION,
+            verdict=cur_verdict.verdict,
+            route_code=cur_verdict.route_code,
+            retry_index=state["gen_attempt"],
+            subcodes=cur_verdict.subcodes,
+        )
         self._record(
             stage_kind=StageKind.CURATION,
             role="curate_committed_sample",
@@ -814,14 +1100,12 @@ class PipelineRunner:
             context_policy=ContextPolicy.CRITERIA_ONLY,
             meta=cur_meta,
             retry_index=state["gen_attempt"],
-        )
-        decision = route_after(
-            run_id=self.config.run_id,
-            from_stage=StageKind.CURATION,
-            verdict=cur_verdict.verdict,
-            route_code=cur_verdict.route_code,
-            retry_index=state["gen_attempt"],
-            subcodes=cur_verdict.subcodes,
+            stage_input={
+                "certified": certified,
+                "quality_verdict": quality_verdict,
+                "rubric_verdict": rubric_verdict,
+            },
+            stage_output={"committed": committed, "curation_verdict": cur_verdict, "decision": decision},
         )
         if committed:
             self.workspace_export.export_committed(committed)
@@ -840,6 +1124,7 @@ class PipelineRunner:
                 "quality_verdict": None,
                 "rubric_verdict": None,
                 "det_checks": [],
+                "last_candidate_id": candidate.id,
             }
 
         self.rejections.append(candidate, decision)
@@ -858,7 +1143,44 @@ class PipelineRunner:
             "quality_verdict": None,
             "rubric_verdict": None,
             "det_checks": [],
+            "last_candidate_id": candidate.id,
         }
+
+    def _generation_result(
+        self,
+        envelope: GenerationEnvelope,
+        final: PipelineState,
+        output_dir: Path | None,
+    ) -> GenerationPipelineResult:
+        last_decision = final.get("last_decision")
+        committed = final.get("committed_count", 0)
+        dropped = final.get("dropped_count", 0)
+        if committed:
+            final_status = "committed"
+        elif dropped:
+            final_status = "dropped"
+        else:
+            final_status = "incomplete"
+        candidate = final.get("candidate")
+        candidate_id = final.get("last_candidate_id")
+        if candidate_id is None and candidate is not None:
+            candidate_id = candidate.id
+        result_path = None if output_dir is None else output_dir / "generation_result.json"
+        return GenerationPipelineResult(
+            run_id=self.config.run_id,
+            envelope_id=envelope.id,
+            design_id=envelope.design.id,
+            final_status=final_status,
+            committed=committed,
+            dropped=dropped,
+            candidate_id=candidate_id,
+            route_code=None if last_decision is None else last_decision.route_code,
+            subcodes=[] if last_decision is None else list(last_decision.subcodes),
+            logs_dir=self.config.logs_dir / self.config.run_id,
+            corpus_path=self.config.data_dir / "corpus" / "benchmark" / f"{self.config.run_id}.jsonl",
+            materialized_dir=self.config.data_dir / "materialized" / "benchmark" / self.config.run_id,
+            result_path=result_path,
+        )
 
     def _record(
         self,
@@ -874,10 +1196,13 @@ class PipelineRunner:
         meta: dict[str, Any],
         subcodes: list[str] | None = None,
         retry_index: int = 0,
+        stage_input: Any | None = None,
+        stage_output: Any | None = None,
     ) -> None:
+        stage_id = f"{stage_kind.value}:{artifact_id}"
         record = StageRecord(
             run_id=self.config.run_id,
-            stage_id=f"{stage_kind.value}:{artifact_id}",
+            stage_id=stage_id,
             role=role,
             stage_kind=stage_kind,
             agent_role=agent_role,
@@ -899,8 +1224,11 @@ class PipelineRunner:
             criteria_hash=stable_hash(self.config.domain.model_dump(mode="json")),
             context_policy=context_policy,
             retry_index=retry_index,
+            input_hash=None if stage_input is None else trace_hash(stage_input),
+            output_hash=None if stage_output is None else trace_hash(stage_output),
+            trace_ref=None if stage_input is None and stage_output is None else "stage_io.jsonl",
         )
-        self.writer.write_stage_record(record)
+        self.writer.write_stage_record(record, stage_input=stage_input, stage_output=stage_output)
         self._progress_record(record)
 
     def _progress_record(self, record: StageRecord) -> None:
@@ -918,6 +1246,15 @@ class PipelineRunner:
         )
 
     def _progress(self, stage: str, event: str, **fields: Any) -> None:
+        self.writer.append_event(
+            "stage_progress",
+            {
+                "run_id": self.config.run_id,
+                "stage": stage,
+                "stage_event": event,
+                **_event_fields(fields),
+            },
+        )
         if not self.config.console_progress:
             return
         if emit_event("stage_progress", {"stage": stage, "event": event, **fields}):
@@ -936,6 +1273,13 @@ def _producer_context_policy(retry_route_code: RouteCode | None) -> ContextPolic
     if retry_route_code in {RouteCode.RETRY_INFRA, RouteCode.RETRY_PARSE, RouteCode.RETRY_PROVIDER_EMPTY}:
         return ContextPolicy.SAME_INPUT_RETRY
     return ContextPolicy.CRITERIA_PLUS_ROUTE_CODE
+
+
+def _write_generation_result(result: GenerationPipelineResult) -> None:
+    if result.result_path is None:
+        return
+    result.result_path.parent.mkdir(parents=True, exist_ok=True)
+    result.result_path.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8")
 
 
 def _bypass_gate_verdict(candidate: CandidateSample, check_kind: str) -> SampleVerdict:
@@ -1001,6 +1345,22 @@ def _format_progress_value(value: Any) -> str:
     if not text:
         return ""
     return text.replace(" ", "_")
+
+
+def _event_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key in {"prompt", "proxy", "candidate", "design", "stage_input", "stage_output"}:
+            continue
+        if hasattr(value, "value"):
+            safe[key] = value.value
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            safe[key] = value
+        elif isinstance(value, list):
+            safe[key] = [item.value if hasattr(item, "value") else item for item in value if isinstance(item, (str, int, float, bool)) or hasattr(item, "value")]
+        else:
+            safe[key] = str(value)
+    return safe
 
 
 def _short_id(value: str) -> str:

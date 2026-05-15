@@ -374,8 +374,8 @@ These should be called out in the PR description.
 - `tests/test_router.py` — no change. Router contract unchanged.
 - `tests/test_rules.py` — no change.
 - `tests/test_schemas.py` — no change.
-- `tests/test_pipeline_smoke.py` — passes unchanged. The fake monkeypatches
-  `pipeline.OpenAIClient`, the new pipeline keeps that import, and
+- `tests/test_pipeline_smoke.py` — passes with the same fake-client pattern. The fake monkeypatches
+  `pipeline.ModelClient`, and
   `PipelineRunner(config).run()` returns the same dict shape with the same
   side-effect file paths. **Constraint:** keep `"Designer"`,
   `"Design Auditor"`, `"Sample Generator"`, `"Semantic Validator"` as substrings

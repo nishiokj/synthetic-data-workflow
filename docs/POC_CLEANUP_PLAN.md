@@ -173,18 +173,18 @@ Verification:
 - `rg -n "output_schema_path" . --glob '!data/**' --glob '!logs/**'`
 - `.venv/bin/python -m pytest`
 
-## 7. Re-evaluate provider/base-url abstraction
+## 7. Re-evaluate provider/base-url abstraction - Done
 
-The code has `provider`, `base_url`, and `OpenAIClient`, but no real provider
-interface beyond OpenAI-compatible HTTP. This is potentially useful for local
-OpenAI-compatible servers, but the naming suggests more abstraction than exists.
+The hand-rolled `OpenAIClient` was replaced with a LangChain-backed `ModelClient`.
+`provider`, `model`, and `base_url` now affect real model construction through
+LangChain instead of only shaping OpenAI-compatible HTTP metadata.
 
-Specific options:
-- Keep `base_url` if OpenAI-compatible endpoints matter.
-- Remove or demote `provider` to metadata if it does not change behavior.
-- Consider renaming `OpenAIClient` to `OpenAICompatibleClient` if `base_url`
-  remains.
-- Remove CLI/env overrides that are not used in the actual demo workflow.
+Current shape:
+- Chat models use `langchain.chat_models.init_chat_model`.
+- Embeddings use `langchain.embeddings.init_embeddings`.
+- Environment overrides use generic `MODEL_*` and `EMBEDDING_*` names.
+- Provider credentials remain provider-specific, as expected by LangChain
+  integration packages.
 
 Files to inspect:
 - `config.py`
@@ -195,7 +195,7 @@ Files to inspect:
 - `README.md`
 
 Verification:
-- `rg -n "provider|base_url|OPENAI_PROVIDER|OPENAI_BASE_URL" . --glob '!data/**' --glob '!logs/**'`
+- `rg -n "OpenAIClient|OPENAI_PROVIDER|OPENAI_BASE_URL" . --glob '!data/**' --glob '!logs/**'`
 - `.venv/bin/python -m pytest`
 
 ## 8. Fix or delete virtual workspace editing methods

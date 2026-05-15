@@ -6,7 +6,7 @@ from config import build_runtime_config
 from pipeline import PipelineRunner
 
 
-class FakeOpenAIClient:
+class FakeModelClient:
     def __init__(self, config) -> None:
         self.config = config
 
@@ -113,7 +113,7 @@ class FakeOpenAIClient:
 
 
 def test_pipeline_smoke_uses_fenced_fake_provider(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
     config = build_runtime_config(
         domain_path="domains/benchmark_haiku.yaml",
         target_stage="benchmark",
@@ -130,11 +130,38 @@ def test_pipeline_smoke_uses_fenced_fake_provider(tmp_path, monkeypatch) -> None
     corpus_path = tmp_path / "data" / "corpus" / "benchmark" / "smoke.jsonl"
     assert corpus_path.exists()
     assert (tmp_path / "logs" / "smoke" / "stage_records.jsonl").exists()
+    stage_io_path = tmp_path / "logs" / "smoke" / "stage_io.jsonl"
+    assert stage_io_path.exists()
+    envelope_path = tmp_path / "logs" / "smoke" / "generation_envelopes.jsonl"
+    assert envelope_path.exists()
     candidates_path = tmp_path / "logs" / "smoke" / "candidates.jsonl"
     assert candidates_path.exists()
+    stage_events_path = tmp_path / "logs" / "smoke" / "stage_events.jsonl"
+    assert stage_events_path.exists()
 
     committed = json.loads(corpus_path.read_text(encoding="utf-8").splitlines()[0])
+    stage_records = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "smoke" / "stage_records.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    stage_io = [json.loads(line) for line in stage_io_path.read_text(encoding="utf-8").splitlines()]
+    envelopes = [json.loads(line) for line in envelope_path.read_text(encoding="utf-8").splitlines()]
     candidate_snapshots = [json.loads(line) for line in candidates_path.read_text(encoding="utf-8").splitlines()]
+    stage_events = [json.loads(line) for line in stage_events_path.read_text(encoding="utf-8").splitlines()]
+    assert len(stage_io) == len(stage_records)
+    assert {"stage": "quality_gate", "stage_event": "provider_start"} in [
+        {"stage": event.get("stage"), "stage_event": event.get("stage_event")} for event in stage_events
+    ]
+    assert {"stage": "rubric_gate", "stage_event": "provider_start"} in [
+        {"stage": event.get("stage"), "stage_event": event.get("stage_event")} for event in stage_events
+    ]
+    assert all("prompt" not in event and "proxy" not in event and "candidate" not in event for event in stage_events)
+    assert all(record["trace_ref"] == "stage_io.jsonl" for record in stage_records)
+    design_trace = next(trace for trace in stage_io if trace["role"] == "design_batch")
+    assert design_trace["output"]["designs"][0]["target_ability"] == "constrained_poetic_generation"
+    generation_trace = next(trace for trace in stage_io if trace["role"] == "generate_candidate_sample")
+    assert generation_trace["input"]["envelope"]["design"]["id"] == envelopes[0]["envelope"]["design"]["id"]
+    assert envelopes[0]["envelope"]["design"]["target_ability"] == "constrained_poetic_generation"
     assert [snapshot["phase"] for snapshot in candidate_snapshots] == ["generated", "adversary_revision"]
     assert candidate_snapshots[1]["parent_candidate_id"] == candidate_snapshots[0]["candidate_id"]
     assert candidate_snapshots[1]["adversary_report_id"] == f"{candidate_snapshots[0]['candidate_id']}-adversary-report"

@@ -6,14 +6,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class ModelConfig(BaseModel):
     provider: str = "openai"
     model: str = "gpt-5.5"
-    embedding_model: str = "text-embedding-3-small"
-    base_url: str = "https://api.openai.com/v1"
+    embedding_provider: str = "local"
+    embedding_model: str = "local-hash-embedding"
+    base_url: Optional[str] = None
+    api_key: Optional[SecretStr] = Field(default=None, repr=False)
+    auth_file: Optional[Path] = None
     reasoning_effort: Optional[str] = "medium"
     request_timeout_seconds: float = 180.0
 
@@ -54,6 +57,10 @@ class RuntimeConfig(BaseModel):
     data_dir: Path = Path("data")
     logs_dir: Path = Path("logs")
     models: ModelConfig = Field(default_factory=ModelConfig)
+    gate_ensemble_models: list[ModelConfig] = Field(default_factory=list)
+    generator_system_prompt_override: str = ""
+    generator_system_prompt_append: str = ""
+    workspace_validation_executor: str = "docker"
     console_progress: bool = True
 
 
@@ -106,19 +113,25 @@ def build_runtime_config(
     run_id: str,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    auth_file: Optional[str | Path] = None,
     embedding_model: Optional[str] = None,
+    generator_system_prompt_override: Optional[str] = None,
+    generator_system_prompt_append: Optional[str] = None,
+    workspace_validation_executor: Optional[str] = None,
     console_progress: bool = True,
 ) -> RuntimeConfig:
     load_env_file()
     domain = load_domain(domain_path)
     models = ModelConfig(
-        provider=provider or os.getenv("OPENAI_PROVIDER", "openai"),
-        model=model or os.getenv("OPENAI_MODEL", "gpt-5.5"),
-        embedding_model=embedding_model
-        or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "medium") or None,
-        request_timeout_seconds=float(os.getenv("OPENAI_TIMEOUT_SECONDS", "180")),
+        provider=provider or os.getenv("MODEL_PROVIDER", "openai"),
+        model=model or os.getenv("MODEL_NAME", "gpt-5.5"),
+        embedding_provider=os.getenv("EMBEDDING_PROVIDER", "local"),
+        embedding_model=embedding_model or os.getenv("EMBEDDING_MODEL", "local-hash-embedding"),
+        base_url=os.getenv("MODEL_BASE_URL") or None,
+        api_key=_optional_secret(os.getenv("MODEL_API_KEY")),
+        auth_file=_resolve_optional_path(auth_file or os.getenv("MODEL_AUTH_FILE")),
+        reasoning_effort=os.getenv("MODEL_REASONING_EFFORT", "medium") or None,
+        request_timeout_seconds=float(os.getenv("MODEL_TIMEOUT_SECONDS", "180")),
     )
     return RuntimeConfig(
         domain=domain,
@@ -128,5 +141,54 @@ def build_runtime_config(
         seed=seed,
         run_id=run_id,
         models=models,
+        gate_ensemble_models=_load_gate_ensemble_models(),
+        generator_system_prompt_override=generator_system_prompt_override
+        if generator_system_prompt_override is not None
+        else os.getenv("GENERATOR_SYSTEM_PROMPT_OVERRIDE", ""),
+        generator_system_prompt_append=generator_system_prompt_append
+        if generator_system_prompt_append is not None
+        else os.getenv("GENERATOR_SYSTEM_PROMPT_APPEND", ""),
+        workspace_validation_executor=workspace_validation_executor
+        if workspace_validation_executor is not None
+        else "docker",
         console_progress=console_progress,
     )
+
+
+def _resolve_optional_path(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
+def _optional_secret(value: str | None) -> SecretStr | None:
+    if value is None or not value.strip():
+        return None
+    return SecretStr(value.strip())
+
+
+def _load_gate_ensemble_models() -> list[ModelConfig]:
+    models: list[ModelConfig] = []
+    index = 1
+    while True:
+        prefix = f"GATE_ENSEMBLE_{index}_"
+        has_any = any(key.startswith(prefix) for key in os.environ)
+        if not has_any:
+            break
+        models.append(
+            ModelConfig(
+                provider=os.getenv(prefix + "PROVIDER", "openai"),
+                model=os.getenv(prefix + "MODEL", "moonshotai/Kimi-K2.6"),
+                base_url=os.getenv(prefix + "BASE_URL", "https://api.deepinfra.com/v1/openai"),
+                api_key=_optional_secret(os.getenv(prefix + "API_KEY")),
+                reasoning_effort=os.getenv(prefix + "REASONING_EFFORT") or None,
+                request_timeout_seconds=float(os.getenv(prefix + "TIMEOUT_SECONDS", os.getenv("MODEL_TIMEOUT_SECONDS", "180"))),
+                embedding_provider=os.getenv("EMBEDDING_PROVIDER", "local"),
+                embedding_model=os.getenv("EMBEDDING_MODEL", "local-hash-embedding"),
+            )
+        )
+        index += 1
+    return models

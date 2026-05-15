@@ -19,8 +19,11 @@ def main() -> int:
     parser.add_argument("--target-stage", default="benchmark", choices=["benchmark"])
     parser.add_argument("--target-n", type=int, default=5)
     parser.add_argument("--model", default=None)
-    parser.add_argument("--provider", default="openai")
+    parser.add_argument("--provider", default=None)
+    parser.add_argument("--auth-file", default=None, help="Provider auth file path. Codex defaults to ~/.codex/auth.json.")
     parser.add_argument("--embedding-model", default=None)
+    parser.add_argument("--generator-system-prompt-override", default=None, help="Optional full generator system prompt override.")
+    parser.add_argument("--generator-system-prompt-append", default=None, help="Optional text appended to the generator system prompt.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-id", default="auto")
     parser.add_argument("--no-progress", action="store_true", help="Disable compact stdout progress lines.")
@@ -49,7 +52,10 @@ def main() -> int:
         run_id=run_id,
         model=args.model,
         provider=args.provider,
+        auth_file=args.auth_file,
         embedding_model=args.embedding_model,
+        generator_system_prompt_override=args.generator_system_prompt_override,
+        generator_system_prompt_append=args.generator_system_prompt_append,
         console_progress=not args.no_progress,
     )
     if config.console_progress:

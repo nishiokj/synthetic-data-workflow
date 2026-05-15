@@ -1,74 +1,98 @@
 from __future__ import annotations
 
 import json
-import socket
+import time
+from http.client import IncompleteRead
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
-from agents import Designer, OpenAIClient, ProviderError, SampleGenerator, _coerce_gate_verdict
+from agents import (
+    CodexClient,
+    Designer,
+    ModelClient,
+    ProviderError,
+    SampleGenerator,
+    _coerce_gate_verdict,
+)
 from config import ModelConfig, load_domain
-from models import AdversaryReport, CandidateSample, DesignBrief, RouteCode, TaxonomyCell, Verdict
+from models import AdversaryReport, CandidateSample, DesignBrief, GenerationEnvelope, RouteCode, TaxonomyCell, Verdict
 
 
-def test_reasoning_effort_is_sent_for_reasoning_models(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+class _FakeResponse:
+    def __init__(
+        self,
+        content: Any,
+        *,
+        usage_metadata: dict[str, int] | None = None,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.content = content
+        self.usage_metadata = usage_metadata or {"input_tokens": 1, "output_tokens": 1}
+        self.response_metadata = response_metadata or {"model_name": "fake-model"}
+
+
+class _FakeLangChainModel:
+    def __init__(self, response: _FakeResponse | Exception, capture: dict[str, Any] | None = None) -> None:
+        self.response = response
+        self.capture = capture
+
+    def invoke(self, messages):
+        if self.capture is not None:
+            self.capture["messages"] = messages
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+def test_reasoning_effort_is_sent_to_langchain_for_openai_reasoning_models(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_post(self: OpenAIClient, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        captured["path"] = path
-        captured["body"] = body
-        return {
-            "choices": [{"message": {"content": '{"ok": true}'}}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        }
+    def fake_init_chat_model(model: str, **kwargs: Any) -> _FakeLangChainModel:
+        captured["model"] = model
+        captured["kwargs"] = kwargs
+        return _FakeLangChainModel(_FakeResponse('{"ok": true}'))
 
-    monkeypatch.setattr(OpenAIClient, "_post", fake_post)
+    monkeypatch.setattr("agents._load_init_chat_model", lambda: fake_init_chat_model)
 
-    client = OpenAIClient(ModelConfig(model="gpt-5-mini", reasoning_effort="medium"))
+    client = ModelClient(ModelConfig(provider="openai", model="gpt-5-mini", reasoning_effort="medium"))
     client.complete_json(system="Return JSON only.", user='{"task": "test"}')
 
-    assert captured["path"] == "/chat/completions"
-    assert captured["body"]["reasoning_effort"] == "medium"
+    assert captured["model"] == "gpt-5-mini"
+    assert captured["kwargs"]["model_provider"] == "openai"
+    assert captured["kwargs"]["reasoning_effort"] == "medium"
+    assert "temperature" not in captured["kwargs"]
 
 
-def test_reasoning_effort_is_not_sent_for_non_reasoning_models(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+def test_reasoning_effort_is_not_sent_for_non_openai_models(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_post(self: OpenAIClient, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        captured["body"] = body
-        return {
-            "choices": [{"message": {"content": '{"ok": true}'}}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        }
+    def fake_init_chat_model(model: str, **kwargs: Any) -> _FakeLangChainModel:
+        captured["model"] = model
+        captured["kwargs"] = kwargs
+        return _FakeLangChainModel(_FakeResponse('{"ok": true}'))
 
-    monkeypatch.setattr(OpenAIClient, "_post", fake_post)
+    monkeypatch.setattr("agents._load_init_chat_model", lambda: fake_init_chat_model)
 
-    client = OpenAIClient(ModelConfig(model="gpt-4.1-mini", reasoning_effort="medium"))
+    client = ModelClient(ModelConfig(provider="anthropic", model="claude-sonnet-test", reasoning_effort="medium"))
     client.complete_json(system="Return JSON only.", user='{"task": "test"}')
 
-    assert "reasoning_effort" not in captured["body"]
+    assert captured["kwargs"]["model_provider"] == "anthropic"
+    assert captured["kwargs"]["temperature"] == 0.4
+    assert "reasoning_effort" not in captured["kwargs"]
 
 
 def test_complete_json_repairs_nul_hex_text_sequences(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    def fake_init_chat_model(model: str, **kwargs: Any) -> _FakeLangChainModel:
+        return _FakeLangChainModel(
+            _FakeResponse('{"word": "clich\\u0000e9", "range": "3\\u0000E2\\u000080\\u00009110 words"}')
+        )
 
-    def fake_post(self: OpenAIClient, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": '{"word": "clich\\u0000e9", "range": "3\\u0000E2\\u000080\\u00009110 words"}'
-                    }
-                }
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        }
+    monkeypatch.setattr("agents._load_init_chat_model", lambda: fake_init_chat_model)
 
-    monkeypatch.setattr(OpenAIClient, "_post", fake_post)
-
-    client = OpenAIClient(ModelConfig(model="gpt-5-mini", reasoning_effort="medium"))
+    client = ModelClient(ModelConfig(model="gpt-5-mini", reasoning_effort="medium"))
     payload, meta = client.complete_json(system="Return JSON only.", user='{"task": "test"}')
 
     assert payload == {"word": "cliché", "range": "3‑10 words"}
@@ -76,24 +100,37 @@ def test_complete_json_repairs_nul_hex_text_sequences(monkeypatch) -> None:
 
 
 def test_complete_text_returns_plain_model_output(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     captured: dict[str, Any] = {}
 
-    def fake_post(self: OpenAIClient, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        captured["body"] = body
-        return {
-            "choices": [{"message": {"content": "A small test output."}}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 4},
-        }
+    def fake_init_chat_model(model: str, **kwargs: Any) -> _FakeLangChainModel:
+        captured["kwargs"] = kwargs
+        return _FakeLangChainModel(
+            _FakeResponse("A small test output.", usage_metadata={"input_tokens": 3, "output_tokens": 4}),
+            captured,
+        )
 
-    monkeypatch.setattr(OpenAIClient, "_post", fake_post)
+    monkeypatch.setattr("agents._load_init_chat_model", lambda: fake_init_chat_model)
 
-    client = OpenAIClient(ModelConfig(model="gpt-5-mini", reasoning_effort="medium"))
+    client = ModelClient(ModelConfig(model="gpt-5-mini", reasoning_effort="medium"))
     output, meta = client.complete_text(system="Follow instructions.", user="Write.")
 
     assert output == "A small test output."
-    assert captured["body"]["messages"][1]["content"] == "Write."
+    assert captured["messages"][1] == ("user", "Write.")
     assert meta["output_tokens"] == 4
+
+
+def test_local_embedding_does_not_initialize_provider_model(monkeypatch) -> None:
+    def fail_init_embeddings():
+        raise AssertionError("remote embedding provider should not be initialized")
+
+    monkeypatch.setattr("agents._load_init_embeddings", fail_init_embeddings)
+
+    client = ModelClient(ModelConfig(embedding_provider="local", embedding_model="local-hash-embedding"))
+    vector, meta = client.embed("same text same text")
+
+    assert len(vector) == 128
+    assert meta["provider"] == "local"
+    assert meta["model"] == "local-hash-embedding"
 
 
 def test_accept_with_reject_signal_code_is_coerced_to_reject() -> None:
@@ -108,34 +145,251 @@ def test_accept_with_reject_signal_code_is_coerced_to_reject() -> None:
     assert "weak_diagnostic_pressure" in subcodes
 
 
-def test_post_wraps_socket_read_timeout(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+def test_model_invocation_errors_are_wrapped(monkeypatch) -> None:
+    def fake_init_chat_model(model: str, **kwargs: Any) -> _FakeLangChainModel:
+        return _FakeLangChainModel(TimeoutError("read timed out"))
 
-    class TimeoutResponse:
+    monkeypatch.setattr("agents._load_init_chat_model", lambda: fake_init_chat_model)
+
+    client = ModelClient(ModelConfig(request_timeout_seconds=12))
+
+    try:
+        client.complete_json(system="Return JSON only.", user='{"task": "test"}')
+    except Exception as exc:
+        assert type(exc).__name__ == "ProviderError"
+        assert "model invocation failed" in str(exc)
+    else:
+        raise AssertionError("expected ProviderError")
+
+
+def test_codex_client_uses_explicit_auth_file_and_streams_response(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": time.time() + 3600,
+                    "account_id": "acct_test",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.chunks = [
+                (
+                    'data: {"type":"response.output_text.delta","delta":"{\\"ok\\": "}\n\n'
+                    'data: {"type":"response.output_text.delta","delta":"true}"}\n\n'
+                ).encode("utf-8"),
+                (
+                    'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5",'
+                    '"usage":{"input_tokens":5,"output_tokens":2}}}\n\n'
+                ).encode("utf-8"),
+                b"ignored trailing bytes",
+            ]
+
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, traceback):
             return False
 
-        def read(self):
-            raise socket.timeout("read timed out")
+        def read(self, size=-1):
+            return self.chunks.pop(0) if self.chunks else b""
 
     def fake_urlopen(request, timeout):
-        assert timeout == 12
-        return TimeoutResponse()
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    client = OpenAIClient(ModelConfig(request_timeout_seconds=12))
+    client = ModelClient(ModelConfig(provider="codex", model="gpt-5.5", auth_file=auth_file, reasoning_effort="medium"))
+    payload, meta = client.complete_json(system="Return JSON only.", user='{"task": "test"}')
 
-    try:
-        client._post("/chat/completions", {"model": "test"})
-    except Exception as exc:
-        assert type(exc).__name__ == "ProviderError"
-        assert "read timed out after 12s" in str(exc)
-    else:
-        raise AssertionError("expected ProviderError")
+    assert payload == {"ok": True}
+    assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert captured["headers"]["Authorization"] == "Bearer access-token"
+    assert captured["headers"]["Chatgpt-account-id"] == "acct_test"
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["store"] is False
+    assert captured["body"]["instructions"] == "Return JSON only."
+    assert captured["body"]["reasoning"] == {"effort": "medium"}
+    assert meta["input_tokens"] == 5
+    assert meta["output_tokens"] == 2
+
+
+def test_codex_client_refreshes_expired_tokens(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "old-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": time.time() - 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size=-1):
+            return self.body
+
+    def fake_urlopen(request, timeout):
+        requests.append({"url": request.full_url, "headers": dict(request.header_items()), "body": request.data})
+        if request.full_url == CodexClient.token_endpoint:
+            return FakeResponse(json.dumps({"access_token": "new-token", "expires_in": 3600}).encode("utf-8"))
+        return FakeResponse(
+            (
+                'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+                'data: {"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}\n\n'
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client = ModelClient(ModelConfig(provider="codex", model="gpt-5.5", auth_file=auth_file))
+    output, _ = client.complete_text(system="Say hi.", user="Hi.")
+
+    assert output == "hello"
+    assert requests[0]["url"] == CodexClient.token_endpoint
+    assert b"grant_type=refresh_token" in requests[0]["body"]
+    assert requests[1]["headers"]["Authorization"] == "Bearer new-token"
+    updated_auth = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert updated_auth["tokens"]["access_token"] == "new-token"
+    assert updated_auth["tokens"]["refresh_token"] == "refresh-token"
+
+
+def test_codex_client_tolerates_incomplete_read_after_completed_event(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": time.time() + 3600,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size=-1):
+            raise IncompleteRead(
+                (
+                    'data: {"type":"response.output_text.delta","delta":"done"}\n\n'
+                    'data: {"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}\n\n'
+                ).encode("utf-8"),
+                128,
+            )
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
+
+    client = ModelClient(ModelConfig(provider="codex", model="gpt-5.5", auth_file=auth_file))
+    output, _ = client.complete_text(system="Say done.", user="Go.")
+
+    assert output == "done"
+
+
+def test_codex_client_rejects_incomplete_read_before_completed_event(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": time.time() + 3600,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size=-1):
+            raise IncompleteRead(b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n', 128)
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
+
+    client = ModelClient(ModelConfig(provider="codex", model="gpt-5.5", auth_file=auth_file))
+    with pytest.raises(ProviderError, match="incomplete HTTP read before response.completed"):
+        client.complete_text(system="Say partial.", user="Go.")
+
+
+def test_codex_client_times_out_stream_without_completed_event(tmp_path, monkeypatch) -> None:
+    auth_file = tmp_path / "codex-auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": time.time() + 3600,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def readline(self):
+            return b'data: {"type":"response.output_text.delta","delta":"still working"}\n\n'
+
+    ticks = iter([0.0, 0.5, 1.1])
+    monkeypatch.setattr("agents.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: FakeResponse())
+
+    client = ModelClient(ModelConfig(provider="codex", model="gpt-5.5", auth_file=auth_file, request_timeout_seconds=1))
+    with pytest.raises(ProviderError, match="Codex stream timed out before response.completed"):
+        client.complete_text(system="Say partial.", user="Go.")
+
+
+def test_codex_client_missing_auth_file_has_clear_error(tmp_path) -> None:
+    client = ModelClient(ModelConfig(provider="codex", model="gpt-5.5", auth_file=tmp_path / "missing.json"))
+
+    with pytest.raises(ProviderError, match="Codex auth file not found"):
+        client.complete_text(system="Say hi.", user="Hi.")
 
 
 def _code_design() -> DesignBrief:
@@ -263,11 +517,15 @@ class _PatchClient:
 
 
 class _GenerateClient:
-    def __init__(self) -> None:
+    def __init__(self, *, require_contract: bool = True) -> None:
+        self.require_contract = require_contract
+        self.system = ""
         self.user_payload: dict[str, Any] | None = None
 
     def complete_json(self, *, system: str, user: str, temperature: float = 0.4):
-        assert "DESIGN IMPLEMENTATION CONTRACT" in system
+        if self.require_contract:
+            assert "DESIGN IMPLEMENTATION CONTRACT" in system
+        self.system = system
         self.user_payload = json.loads(user)
         return {
             "agent_artifact": {
@@ -375,6 +633,85 @@ def test_generation_retry_payload_includes_actionable_code_debug_guidance() -> N
     assert any("Candidate-facing material leaked the answer" in item for item in rejection["retry_guidance"])
     assert client.user_payload["design_brief"]["runtime_requirements"]["kind"] == "filesystem_task"
     assert client.user_payload["example_output"]["agent_artifact"]["runtime_requirements"]["commands"]["test"] == "python -m pytest -q"
+
+
+def test_generation_accepts_structured_envelope() -> None:
+    design = _code_design()
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    client = _GenerateClient()
+    generator = SampleGenerator(client, domain)
+    envelope = GenerationEnvelope.from_design(
+        design,
+        envelope_id="billing-ledger-v1",
+        domain_ref="domains/benchmark_code_debug.yaml",
+        seed_context={"seed_family": "billing-ledger"},
+    )
+
+    candidate, _ = generator.generate_from_envelope(run_id="run", envelope=envelope, attempt=1)
+
+    assert client.user_payload["generation_envelope"]["id"] == "billing-ledger-v1"
+    assert client.user_payload["generation_envelope"]["domain_ref"] == "domains/benchmark_code_debug.yaml"
+    assert "generator_policy" not in client.user_payload["generation_envelope"]
+    assert "tags" not in client.user_payload["generation_envelope"]
+    assert client.user_payload["generation_envelope"]["seed_context"] == {"seed_family": "billing-ledger"}
+    assert "experiment_context" not in client.user_payload
+    assert candidate.provenance["generation_envelope_id"] == "billing-ledger-v1"
+    assert "generator_variant" not in candidate.provenance
+
+
+def test_generator_accepts_experiment_supplied_system_prompt_append() -> None:
+    design = _code_design()
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    default_client = _GenerateClient()
+    treatment_client = _GenerateClient()
+    treatment_text = "This is experiment-owned independent-variable prompt text."
+
+    SampleGenerator(default_client, domain).generate(run_id="run", design=design, attempt=1)
+    SampleGenerator(treatment_client, domain, system_prompt_append=treatment_text).generate(
+        run_id="run",
+        design=design,
+        attempt=1,
+    )
+
+    assert "EXPERIMENT-SUPPLIED GENERATOR INSTRUCTIONS" not in default_client.system
+    assert "EXPERIMENT-SUPPLIED GENERATOR INSTRUCTIONS" in treatment_client.system
+    assert treatment_text in treatment_client.system
+
+
+def test_generator_accepts_experiment_supplied_system_prompt_override() -> None:
+    design = _code_design()
+    domain = load_domain("domains/benchmark_code_debug.yaml")
+    client = _GenerateClient(require_contract=False)
+    override = "You are a minimal generator. Return JSON only."
+
+    SampleGenerator(client, domain, system_prompt_override=override).generate(run_id="run", design=design, attempt=1)
+
+    assert client.system.startswith(override)
+    assert "Benchmark Case Generator" not in client.system
+    assert "DESIGN IMPLEMENTATION CONTRACT" not in client.system
+    assert client.user_payload["generation_envelope"]["design"]["id"] == design.id
+
+
+def test_experiment_rubric_prompt_uses_domain_rubric_context_token() -> None:
+    experiment_paths = [
+        Path("experiments/adversary_awareness/experiment.yaml"),
+        Path("experiments/adversary_awareness/experiment.smoke.yaml"),
+    ]
+
+    for experiment_path in experiment_paths:
+        experiment = yaml.safe_load(experiment_path.read_text(encoding="utf-8"))
+        variants = {variant["variant_id"]: variant for variant in [experiment["baseline"]] + experiment["variant_plan"]}
+
+        assert variants["generator_minimal"]["bindings"]["generator_system_prompt_append"] == ""
+        assert "{{DOMAIN_RUBRIC_CONTEXT}}" not in variants["generator_minimal_adversary"]["bindings"][
+            "generator_system_prompt_append"
+        ]
+        assert "{{DOMAIN_RUBRIC_CONTEXT}}" in variants["generator_minimal_rubric"]["bindings"][
+            "generator_system_prompt_append"
+        ]
+        assert "{{DOMAIN_RUBRIC_CONTEXT}}" in variants["generator_minimal_rubric_adversary"]["bindings"][
+            "generator_system_prompt_append"
+        ]
 
 
 def test_revision_applies_patch_to_prior_candidate_and_virtual_workspace() -> None:

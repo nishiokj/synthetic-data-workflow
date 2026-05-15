@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -195,6 +196,56 @@ class DesignBrief(BaseModel):
         )
 
 
+class GenerationEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    domain_ref: Optional[str] = None
+    design: DesignBrief
+    seed_context: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_design(
+        cls,
+        design: DesignBrief,
+        *,
+        envelope_id: Optional[str] = None,
+        domain_ref: Optional[str] = None,
+        seed_context: Optional[dict[str, Any]] = None,
+    ) -> "GenerationEnvelope":
+        return cls(
+            id=envelope_id or design.id,
+            domain_ref=domain_ref,
+            design=design,
+            seed_context=seed_context or {},
+        )
+
+
+class GenerationPipelineInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    envelope: GenerationEnvelope
+    output_dir: Optional[Path] = None
+
+
+class GenerationPipelineResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    envelope_id: str
+    design_id: str
+    final_status: Literal["committed", "dropped", "incomplete"]
+    committed: int
+    dropped: int
+    candidate_id: Optional[str] = None
+    route_code: Optional[RouteCode] = None
+    subcodes: list[str] = Field(default_factory=list)
+    logs_dir: Path
+    corpus_path: Path
+    materialized_dir: Path
+    result_path: Optional[Path] = None
+
+
 class DesignVerdict(BaseModel):
     design_id: str
     verdict: Verdict
@@ -317,4 +368,7 @@ class StageRecord(BaseModel):
     context_policy: ContextPolicy
     retry_index: int = 0
     attempt_of: Optional[str] = None
+    input_hash: Optional[str] = None
+    output_hash: Optional[str] = None
+    trace_ref: Optional[str] = None
     wallclock_ts: str = Field(default_factory=utc_now_iso)

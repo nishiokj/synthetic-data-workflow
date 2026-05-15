@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+import json
+
 from langgraph.graph import END
 
 from config import build_runtime_config
-from models import AdversaryReport, CandidateSample, ContextPolicy, RouteCode, RoutingDecision, SampleVerdict, DesignBrief, StageKind, TaxonomyCell, Verdict
+from models import (
+    AdversaryReport,
+    CandidateSample,
+    ContextPolicy,
+    GenerationEnvelope,
+    GenerationPipelineInput,
+    RouteCode,
+    RoutingDecision,
+    SampleVerdict,
+    DesignBrief,
+    StageKind,
+    TaxonomyCell,
+    Verdict,
+)
 from pipeline import (
     PipelineRunner,
     after_adversary,
@@ -17,7 +32,7 @@ from pipeline import (
     _graph_recursion_limit,
     route_from_decision,
 )
-from tests.test_pipeline_smoke import FakeOpenAIClient
+from tests.test_pipeline_smoke import FakeModelClient
 
 
 def _code_design(design_id: str, *, environment_premise: dict | None = None) -> DesignBrief:
@@ -56,6 +71,26 @@ def _code_design(design_id: str, *, environment_premise: dict | None = None) -> 
         minimum_depth_requirements=["requires at least two modules and a state invariant"],
         forbidden_shortcuts=["one-line arithmetic boundary patch", "test edit", "formatter mask"],
         non_goals=["typo", "missing import", "one-line loop patch"],
+    )
+
+
+def _haiku_design(design_id: str) -> DesignBrief:
+    cell = TaxonomyCell(case_type="proxy_strong", difficulty=3, scenario="adversarial")
+    return DesignBrief.create(
+        design_id=design_id,
+        cell=cell,
+        target_ability="constrained_poetic_generation",
+        target_environment="single_turn_creative_writing",
+        design_intent="Generate a haiku benchmark that pressures metaphor and anti-template behavior.",
+        environment_premise={"mode": "single turn", "tools": "none"},
+        failure_mode_family="template compliance without emotional transfer",
+        diagnostic_pressure=["forbid obvious imagery while preserving emotional intent"],
+        why_weak_agents_fail=["they produce a format-valid seasonal template"],
+        tempting_shallow_solutions=["generic haiku about autumn sadness"],
+        success_evidence_required=["indirect metaphor", "constraint adherence"],
+        minimum_depth_requirements=["balance form, lexical avoidance, and emotional intent"],
+        forbidden_shortcuts=["format-only haiku"],
+        non_goals=["broad literary greatness"],
     )
 
 
@@ -115,7 +150,7 @@ def _candidate(design: DesignBrief) -> CandidateSample:
 
 
 def test_compiled_graph_contains_pipeline_nodes(monkeypatch) -> None:
-    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
     config = build_runtime_config(
         domain_path="domains/benchmark_haiku.yaml",
         target_stage="benchmark",
@@ -142,6 +177,32 @@ def test_compiled_graph_contains_pipeline_nodes(monkeypatch) -> None:
     }
 
 
+def test_generation_entrypoint_graph_starts_at_generate(monkeypatch) -> None:
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
+    config = build_runtime_config(
+        domain_path="domains/benchmark_haiku.yaml",
+        target_stage="benchmark",
+        target_n=1,
+        seed=42,
+        run_id="generation-graph",
+    )
+
+    graph = PipelineRunner(config).generation_graph.get_graph()
+
+    assert set(graph.nodes) - {"__start__", "__end__"} == {
+        "generate",
+        "validate_det",
+        "adversary",
+        "revise_from_adversary",
+        "quality_gate",
+        "rubric_gate",
+        "join_gates",
+        "curate",
+    }
+    assert "design" not in graph.nodes
+    assert "audit_design" not in graph.nodes
+
+
 def test_graph_recursion_limit_scales_with_run_policy() -> None:
     config = build_runtime_config(
         domain_path="domains/benchmark_haiku.yaml",
@@ -155,7 +216,7 @@ def test_graph_recursion_limit_scales_with_run_policy() -> None:
 
 
 def test_design_batch_partition_keeps_valid_designs_from_mixed_batch(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
     config = build_runtime_config(
         domain_path="domains/benchmark_code_debug.yaml",
         target_stage="benchmark",
@@ -306,7 +367,7 @@ def test_after_adversary_revise_still_routes_to_revision() -> None:
 
 
 def test_adversary_pass_skips_revision_and_routes_to_gates_as_caveats(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
     config = build_runtime_config(
         domain_path="domains/benchmark_code_debug.yaml",
         target_stage="benchmark",
@@ -336,15 +397,12 @@ def test_adversary_pass_skips_revision_and_routes_to_gates_as_caveats(tmp_path, 
 
     assert update["adversary_done"] is True
     assert update["last_decision"] is None
-    assert after_adversary(update) == ["quality_gate", "rubric_gate"]
-    assert after_validate_det({"det_accepted": True, "adversary_done": update["adversary_done"]}) == [
-        "quality_gate",
-        "rubric_gate",
-    ]
+    assert after_adversary(update) == "quality_gate"
+    assert after_validate_det({"det_accepted": True, "adversary_done": update["adversary_done"]}) == "quality_gate"
 
 
 def test_join_gates_records_rejects_as_caveats_without_rerouting(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("pipeline.OpenAIClient", FakeOpenAIClient)
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
     config = build_runtime_config(
         domain_path="domains/benchmark_code_debug.yaml",
         target_stage="benchmark",
@@ -385,3 +443,66 @@ def test_join_gates_records_rejects_as_caveats_without_rerouting(tmp_path, monke
     assert decision.route_code == RouteCode.ACCEPT
     assert decision.subcodes == ["quality_gate_rejected", "answer_leak_in_candidate_materials"]
     assert after_gate_join(update) == "curate"
+
+
+def test_run_from_generation_uses_envelope_and_writes_single_run_result(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("pipeline.ModelClient", FakeModelClient)
+    config = build_runtime_config(
+        domain_path="domains/benchmark_haiku.yaml",
+        target_stage="benchmark",
+        target_n=1,
+        seed=42,
+        run_id="from-generation",
+    )
+    config.data_dir = tmp_path / "data"
+    config.logs_dir = tmp_path / "logs"
+    runner = PipelineRunner(config)
+    envelope = GenerationEnvelope.from_design(
+        _haiku_design("haiku-seed-1"),
+        envelope_id="haiku-envelope-1",
+        seed_context={"fixture": "static-seed"},
+    )
+
+    result = runner.run_from_generation(
+        GenerationPipelineInput(
+            envelope=envelope,
+            output_dir=tmp_path / "entrypoint-output",
+        )
+    )
+
+    assert result.run_id == "from-generation"
+    assert result.envelope_id == "haiku-envelope-1"
+    assert result.final_status == "committed"
+    assert result.committed == 1
+    assert result.dropped == 0
+    assert result.candidate_id
+    assert result.result_path is not None
+    written = json.loads(result.result_path.read_text(encoding="utf-8"))
+    assert written["envelope_id"] == "haiku-envelope-1"
+    stage_records = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "from-generation" / "stage_records.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    roles = [record["role"] for record in stage_records]
+    assert roles[0] == "generate_candidate_sample"
+    assert "design_batch" not in roles
+    assert "audit_design" not in roles
+    assert stage_records[0]["trace_ref"] == "stage_io.jsonl"
+    stage_io = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "from-generation" / "stage_io.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert stage_io[0]["input"]["envelope"]["id"] == "haiku-envelope-1"
+    envelopes = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "from-generation" / "generation_envelopes.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert envelopes[0]["envelope"]["id"] == "haiku-envelope-1"
+    assert envelopes[0]["envelope"]["seed_context"] == {"fixture": "static-seed"}
+    candidates = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "from-generation" / "candidates.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert candidates[0]["candidate"]["provenance"]["generation_envelope_id"] == "haiku-envelope-1"

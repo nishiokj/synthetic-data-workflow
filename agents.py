@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import os
-import socket
 import time
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from http.client import IncompleteRead
+from pathlib import Path
+from typing import Any
 import urllib.error
 import urllib.request
-from copy import deepcopy
-from typing import Any
+import urllib.parse
 
 from config import DomainConfig, ModelConfig
 from models import (
@@ -15,6 +19,7 @@ from models import (
     CandidateSample,
     EvidenceRef,
     DesignVerdict,
+    GenerationEnvelope,
     RouteCode,
     SampleVerdict,
     DesignBrief,
@@ -30,38 +35,24 @@ class ProviderError(RuntimeError):
     pass
 
 
-class OpenAIClient:
+class ModelClient:
     def __init__(self, config: ModelConfig) -> None:
         self.config = config
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ProviderError("OPENAI_API_KEY is required for the live POC demo")
+        self._codex_client: CodexClient | None = None
 
     def complete_json(self, *, system: str, user: str, temperature: float = 0.4) -> tuple[dict[str, Any], dict[str, Any]]:
         started = time.perf_counter()
-        body = {
-            "model": self.config.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "response_format": {"type": "json_object"},
-        }
-        if self.config.reasoning_effort and _supports_reasoning_effort(self.config.model):
-            body["reasoning_effort"] = self.config.reasoning_effort
-        if not self.config.model.startswith("gpt-5"):
-            body["temperature"] = temperature
-        response = self._post("/chat/completions", body)
+        response = self._invoke_chat(system=system, user=user, temperature=temperature)
         latency_ms = int((time.perf_counter() - started) * 1000)
-        content = response["choices"][0]["message"]["content"]
+        content = _message_text(response)
         if not content:
             raise ProviderError("provider returned empty JSON content")
-        usage = response.get("usage", {})
+        usage = _usage_metadata(response)
         meta = {
             "provider": self.config.provider,
-            "model": self.config.model,
-            "input_tokens": int(usage.get("prompt_tokens", 0)),
-            "output_tokens": int(usage.get("completion_tokens", 0)),
+            "model": _response_model_name(response) or self.config.model,
+            "input_tokens": int(usage.get("input_tokens", 0)),
+            "output_tokens": int(usage.get("output_tokens", 0)),
             "latency_ms": latency_ms,
             "cost_usd": 0.0,
             "reasoning_effort": self.config.reasoning_effort,
@@ -76,29 +67,18 @@ class OpenAIClient:
 
     def complete_text(self, *, system: str, user: str, temperature: float = 0.7) -> tuple[str, dict[str, Any]]:
         started = time.perf_counter()
-        body = {
-            "model": self.config.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        }
-        if self.config.reasoning_effort and _supports_reasoning_effort(self.config.model):
-            body["reasoning_effort"] = self.config.reasoning_effort
-        if not self.config.model.startswith("gpt-5"):
-            body["temperature"] = temperature
-        response = self._post("/chat/completions", body)
+        response = self._invoke_chat(system=system, user=user, temperature=temperature)
         latency_ms = int((time.perf_counter() - started) * 1000)
-        content = response["choices"][0]["message"]["content"]
+        content = _message_text(response)
         if not content:
             raise ProviderError("provider returned empty text content")
-        usage = response.get("usage", {})
+        usage = _usage_metadata(response)
         content, replacements = normalize_text_tree(content)
         return content, {
             "provider": self.config.provider,
-            "model": self.config.model,
-            "input_tokens": int(usage.get("prompt_tokens", 0)),
-            "output_tokens": int(usage.get("completion_tokens", 0)),
+            "model": _response_model_name(response) or self.config.model,
+            "input_tokens": int(usage.get("input_tokens", 0)),
+            "output_tokens": int(usage.get("output_tokens", 0)),
             "latency_ms": latency_ms,
             "cost_usd": 0.0,
             "reasoning_effort": self.config.reasoning_effort,
@@ -107,50 +87,251 @@ class OpenAIClient:
 
     def embed(self, text: str) -> tuple[list[float], dict[str, Any]]:
         started = time.perf_counter()
-        response = self._post(
-            "/embeddings",
-            {"model": self.config.embedding_model, "input": text},
-        )
+        if self.config.embedding_provider in {"local", "hash", "deterministic"}:
+            vector = _local_embedding(text)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return vector, {
+                "provider": self.config.embedding_provider,
+                "model": self.config.embedding_model,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "latency_ms": latency_ms,
+                "cost_usd": 0.0,
+            }
+        model = self._init_embedding_model()
+        try:
+            embedding = model.embed_query(text)
+        except Exception as exc:
+            raise ProviderError(f"embedding invocation failed: {exc}") from exc
         latency_ms = int((time.perf_counter() - started) * 1000)
-        usage = response.get("usage", {})
-        return response["data"][0]["embedding"], {
-            "provider": self.config.provider,
+        return list(embedding), {
+            "provider": self.config.embedding_provider,
             "model": self.config.embedding_model,
-            "input_tokens": int(usage.get("prompt_tokens", 0)),
+            "input_tokens": 0,
             "output_tokens": 0,
             "latency_ms": latency_ms,
             "cost_usd": 0.0,
         }
 
-    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        url = self.config.base_url.rstrip("/") + path
-        data = json.dumps(body).encode("utf-8")
+    def _invoke_chat(self, *, system: str, user: str, temperature: float) -> Any:
+        if _model_provider(self.config) == "codex":
+            if self._codex_client is None:
+                self._codex_client = CodexClient(self.config)
+            return self._codex_client.invoke(system=system, user=user)
+        model = self._init_chat_model(temperature=temperature)
+        try:
+            return model.invoke([("system", system), ("user", user)])
+        except Exception as exc:
+            raise ProviderError(f"model invocation failed: {exc}") from exc
+
+    def _init_chat_model(self, *, temperature: float) -> Any:
+        init_chat_model = _load_init_chat_model()
+        kwargs: dict[str, Any] = {"timeout": self.config.request_timeout_seconds}
+        if _supports_temperature(self.config):
+            kwargs["temperature"] = temperature
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        if self.config.api_key is not None:
+            kwargs["api_key"] = self.config.api_key.get_secret_value()
+        if self.config.reasoning_effort and _supports_reasoning_effort(self.config):
+            kwargs["reasoning_effort"] = self.config.reasoning_effort
+        if _model_has_provider_prefix(self.config.model):
+            return init_chat_model(self.config.model, **kwargs)
+        return init_chat_model(self.config.model, model_provider=self.config.provider, **kwargs)
+
+    def _init_embedding_model(self) -> Any:
+        init_embeddings = _load_init_embeddings()
+        kwargs: dict[str, Any] = {}
+        if self.config.base_url and self.config.embedding_provider == self.config.provider:
+            kwargs["base_url"] = self.config.base_url
+        if _model_has_provider_prefix(self.config.embedding_model):
+            return init_embeddings(self.config.embedding_model, **kwargs)
+        return init_embeddings(self.config.embedding_model, provider=self.config.embedding_provider, **kwargs)
+
+
+@dataclass
+class CodexResponse:
+    content: str
+    usage_metadata: dict[str, int]
+    response_metadata: dict[str, Any]
+
+
+class CodexClient:
+    base_url = "https://chatgpt.com/backend-api/codex"
+    token_endpoint = "https://auth.openai.com/oauth/token"
+    client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+    refresh_buffer_seconds = 300
+
+    def __init__(self, config: ModelConfig) -> None:
+        self.config = config
+        self.auth_file = config.auth_file or Path.home() / ".codex" / "auth.json"
+        self.auth_root: dict[str, Any] = {}
+        self.auth_uses_nested_tokens = False
+        self.tokens = self._load_tokens()
+
+    def invoke(self, *, system: str, user: str) -> CodexResponse:
+        token = self._access_token()
+        body = {
+            "model": self.config.model,
+            "input": [{"type": "message", "role": "user", "content": user}],
+            "stream": True,
+            "store": False,
+            "instructions": system,
+            "reasoning": {"effort": self.config.reasoning_effort or "medium"},
+        }
         request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            f"{self.config.base_url or self.base_url}/responses",
+            data=json.dumps(body).encode("utf-8"),
+            headers=self._headers(token),
             method="POST",
         )
         try:
             with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds) as response:
-                raw = response.read()
-                return json.loads(raw.decode("utf-8"))
+                raw = _read_codex_sse(response, timeout_seconds=self.config.request_timeout_seconds)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ProviderError(f"OpenAI HTTP {exc.code}: {detail}") from exc
+            raise ProviderError(f"Codex API error {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
-            raise ProviderError(f"OpenAI connection error: {exc}") from exc
-        except (TimeoutError, socket.timeout) as exc:
-            raise ProviderError(f"OpenAI read timed out after {self.config.request_timeout_seconds:g}s") from exc
+            raise ProviderError(f"Codex connection error: {exc}") from exc
+        return self._parse_sse(raw)
+
+    def _headers(self, token: str) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+        account_id = self.tokens.get("chatgpt_account_id") or self.tokens.get("account_id")
+        if account_id:
+            headers["Chatgpt-Account-Id"] = str(account_id)
+        return headers
+
+    def _load_tokens(self) -> dict[str, Any]:
+        if not self.auth_file.exists():
+            raise ProviderError(f"Codex auth file not found: {self.auth_file}")
+        try:
+            raw = json.loads(self.auth_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ProviderError(f"Codex auth file could not be read: {self.auth_file}") from exc
+        if not isinstance(raw, dict):
+            raise ProviderError(f"Codex auth file root must be an object: {self.auth_file}")
+        self.auth_root = dict(raw)
+        self.auth_uses_nested_tokens = isinstance(raw.get("tokens"), dict)
+        tokens = raw.get("tokens") if isinstance(raw.get("tokens"), dict) else raw
+        if not isinstance(tokens, dict):
+            raise ProviderError(f"Codex auth file has no token object: {self.auth_file}")
+        access_token = _nonempty_string(tokens.get("access_token"))
+        refresh_token = _nonempty_string(tokens.get("refresh_token"))
+        if not access_token or not refresh_token:
+            raise ProviderError(f"Codex auth file must contain access_token and refresh_token: {self.auth_file}")
+        normalized = dict(tokens)
+        account_id = (
+            _nonempty_string(raw.get("chatgpt_account_id"))
+            or _nonempty_string(tokens.get("chatgpt_account_id"))
+            or _nonempty_string(tokens.get("account_id"))
+            or _extract_codex_account_id(_nonempty_string(tokens.get("id_token")) or "")
+        )
+        if account_id:
+            normalized["chatgpt_account_id"] = account_id
+        normalized["expires_at"] = _positive_number(tokens.get("expires_at")) or _jwt_expiry(access_token) or time.time() + 3600
+        return normalized
+
+    def _access_token(self) -> str:
+        expires_at = float(self.tokens.get("expires_at") or 0)
+        if time.time() < expires_at - self.refresh_buffer_seconds:
+            return str(self.tokens["access_token"])
+        return self._refresh_access_token()
+
+    def _refresh_access_token(self) -> str:
+        body = urllib.parse.urlencode(
+            {
+                "grant_type": "refresh_token",
+                "client_id": self.client_id,
+                "refresh_token": str(self.tokens["refresh_token"]),
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.token_endpoint,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise ProviderError(f"Codex token refresh failed {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise ProviderError(f"Codex token refresh connection error: {exc}") from exc
+        access_token = _nonempty_string(data.get("access_token"))
+        if not access_token:
+            raise ProviderError("Codex token refresh response did not include access_token")
+        self.tokens["access_token"] = access_token
+        self.tokens["refresh_token"] = _nonempty_string(data.get("refresh_token")) or self.tokens["refresh_token"]
+        self.tokens["expires_at"] = time.time() + float(data.get("expires_in") or 3600)
+        if data.get("id_token"):
+            self.tokens["id_token"] = data["id_token"]
+            account_id = _extract_codex_account_id(str(data["id_token"]))
+            if account_id:
+                self.tokens["chatgpt_account_id"] = account_id
+        self._store_tokens()
+        return access_token
+
+    def _store_tokens(self) -> None:
+        if self.auth_uses_nested_tokens:
+            self.auth_root["tokens"] = dict(self.tokens)
+            self.auth_root["last_refresh"] = datetime.now(timezone.utc).isoformat()
+            payload = self.auth_root
+        else:
+            payload = dict(self.tokens)
+        self.auth_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        try:
+            self.auth_file.chmod(0o600)
+        except OSError:
+            pass
+
+    def _parse_sse(self, raw: str) -> CodexResponse:
+        content = ""
+        usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        model = self.config.model
+        response_id = None
+        for payload in _sse_payloads(raw):
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            event_type = event.get("type")
+            if event_type == "response.created":
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                response_id = response.get("id") or event.get("id") or response_id
+            elif event_type == "response.output_text.delta":
+                content += str(event.get("delta") or "")
+            elif event_type == "response.output_text.done":
+                text = event.get("text")
+                if isinstance(text, str) and not content:
+                    content = text
+            elif event_type == "response.completed":
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                model = str(response.get("model") or model)
+                response_id = response.get("id") or response_id
+                if not content:
+                    content = _codex_response_text(response)
+                raw_usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+                usage = {
+                    "input_tokens": int(raw_usage.get("input_tokens") or 0),
+                    "output_tokens": int(raw_usage.get("output_tokens") or 0),
+                }
+        return CodexResponse(
+            content=content,
+            usage_metadata=usage,
+            response_metadata={"model_name": model, "id": response_id},
+        )
 
 
 class Designer:
     role_name = "Designer"
 
-    def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
+    def __init__(self, client: ModelClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
 
@@ -297,7 +478,7 @@ class Designer:
 class DesignAuditor:
     role_name = "DesignAuditor"
 
-    def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
+    def __init__(self, client: ModelClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
 
@@ -437,6 +618,13 @@ that can separate adequate from excellent behavior when the domain supports that
 Return only a case you would be willing to defend as a promoted corpus item under
 its stated assumptions and limits.
 """.strip()
+
+
+_GENERATOR_IMPLEMENTATION_CONTRACT = """
+
+DESIGN IMPLEMENTATION CONTRACT
+You are implementing a diagnostic design brief. The design brief decides the target ability, target environment, failure family, diagnostic pressure, shallow paths, and minimum depth. You may choose concrete artifact details, but you may not lower the ambition, simplify the causal structure, replace the failure family, or turn the brief into a smaller benchmark. The design brief's runtime_requirements are binding: do not silently change language, runtime, OS assumptions, dependency policy, package requirements, network posture, or test command shape. If the task needs files, services, tools, packages, or a runtime to execute, declare those requirements in agent_artifact.runtime_requirements and make the environment artifact consistent with them. If implementation choices are needed, choose the strongest faithful artifact that preserves the design's evidence requirements; do not optimize for the smallest possible repository or easiest local patch. Treat agent_artifact as the only material the evaluated agent will see; it must look like an ordinary task workspace with symptoms and constraints, not an answer key. Treat judge_artifact as unseen evaluator metadata; put the intended diagnosis, causal explanation, expected repair boundaries, negative-control explanations, and gaming analysis there instead of in the prompt, source comments, tests, README, fixture names, or visible outputs.
+""".rstrip()
 
 
 def _format_generator_guidance(domain: DomainConfig) -> str:
@@ -741,10 +929,20 @@ def _example_output_for_domain(domain: DomainConfig) -> dict[str, Any]:
 class SampleGenerator:
     role_name = "SampleGenerator"
 
-    def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
+    def __init__(
+        self,
+        client: ModelClient,
+        domain: DomainConfig,
+        *,
+        system_prompt_override: str = "",
+        system_prompt_append: str = "",
+    ) -> None:
         self.client = client
         self.domain = domain
-        self._system = _GENERATOR_PRINCIPLES + _format_generator_guidance(domain)
+        self.system_prompt_append = system_prompt_append.strip()
+        self._system = system_prompt_override.strip() or (
+            _GENERATOR_PRINCIPLES + _format_generator_guidance(domain) + _GENERATOR_IMPLEMENTATION_CONTRACT
+        )
 
     def generate(
         self,
@@ -755,18 +953,28 @@ class SampleGenerator:
         retry_route_code: RouteCode | None = None,
         retry_subcodes: list[str] | None = None,
     ) -> tuple[CandidateSample, dict[str, Any]]:
-        system = (
-            self._system
-            + "\n\nDESIGN IMPLEMENTATION CONTRACT\n"
-            "You are implementing a diagnostic design brief. The design brief decides the target ability, target environment, failure family, diagnostic pressure, shallow paths, and minimum depth. "
-            "You may choose concrete artifact details, but you may not lower the ambition, simplify the causal structure, replace the failure family, or turn the brief into a smaller benchmark. "
-            "The design brief's runtime_requirements are binding: do not silently change language, runtime, OS assumptions, dependency policy, package requirements, network posture, or test command shape. "
-            "If the task needs files, services, tools, packages, or a runtime to execute, declare those requirements in agent_artifact.runtime_requirements and make the environment artifact consistent with them. "
-            "If implementation choices are needed, choose the strongest faithful artifact that preserves the design's evidence requirements; do not optimize for the smallest possible repository or easiest local patch. "
-            "Treat agent_artifact as the only material the evaluated agent will see; it must look like an ordinary task workspace with symptoms and constraints, not an answer key. "
-            "Treat judge_artifact as unseen evaluator metadata; put the intended diagnosis, causal explanation, expected repair boundaries, negative-control explanations, and gaming analysis there instead of in the prompt, source comments, tests, README, fixture names, or visible outputs."
+        envelope = GenerationEnvelope.from_design(design)
+        return self.generate_from_envelope(
+            run_id=run_id,
+            envelope=envelope,
+            attempt=attempt,
+            retry_route_code=retry_route_code,
+            retry_subcodes=retry_subcodes,
         )
+
+    def generate_from_envelope(
+        self,
+        *,
+        run_id: str,
+        envelope: GenerationEnvelope,
+        attempt: int,
+        retry_route_code: RouteCode | None = None,
+        retry_subcodes: list[str] | None = None,
+    ) -> tuple[CandidateSample, dict[str, Any]]:
+        design = envelope.design
+        system = self._system + self._system_prompt_append_section()
         payload: dict[str, Any] = {
+            "generation_envelope": envelope.model_dump(mode="json"),
             "design_brief": design.model_dump(mode="json"),
             "domain": {
                 "output_schema": self.domain.output_schema,
@@ -791,6 +999,7 @@ class SampleGenerator:
         agent_artifact = _agent_artifact_from_payload(payload)
         judge_artifact = _judge_artifact_from_payload(payload)
         content = {
+            "generation_envelope_id": envelope.id,
             "design_id": design.id,
             "cell": design.cell.model_dump(),
             "output": {
@@ -816,9 +1025,18 @@ class SampleGenerator:
             environment_y=dict(payload.get("environment_y", {})),
             difficulty=design.cell.difficulty,
             case_type=design.cell.case_type,
-            provenance={"design_id": design.id, "generator": self.role_name},
+            provenance={
+                "design_id": design.id,
+                "generation_envelope_id": envelope.id,
+                "generator": self.role_name,
+            },
         )
         return candidate, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
+
+    def _system_prompt_append_section(self) -> str:
+        if not self.system_prompt_append:
+            return ""
+        return "\n\nEXPERIMENT-SUPPLIED GENERATOR INSTRUCTIONS\n" + self.system_prompt_append
 
     def revise_from_attack(
         self,
@@ -907,6 +1125,50 @@ class SampleGenerator:
         return revised, {**meta, "prompt_hash": stable_hash({"system": system, "user": user})}
 
 
+ADVERSARY_ATTACK_TYPE_TAXONOMY: dict[str, dict[str, str]] = {
+    "answer_leakage": {
+        "coverage_group": "explicit",
+        "definition": "Candidate-facing material reveals or strongly hints at the intended answer, root cause, fix, scoring answer, or hidden expectation.",
+    },
+    "cheap_pass": {
+        "coverage_group": "explicit",
+        "definition": "A weak model can get a high score through a shallow or local exploit such as patching a visible line, matching a traceback, changing a literal/operator/default, editing a test, hard-coding an expected value, or following labels and names that reveal the solution.",
+    },
+    "test_overfitting": {
+        "coverage_group": "explicit",
+        "definition": "Visible tests or fixtures are narrow enough that fixture-specific hard-coding or test-output overfitting can pass without demonstrating the target ability.",
+    },
+    "test_overfitting_loophole": {
+        "coverage_group": "explicit",
+        "definition": "Visible tests or fixtures are narrow enough that fixture-specific hard-coding or test-output overfitting can pass without demonstrating the target ability.",
+    },
+    "straw_negative_control": {
+        "coverage_group": "explicit",
+        "definition": "Negative controls are generic, implausible, or too obviously bad rather than concrete plausible shallow fixes tied to the artifact.",
+    },
+    "proxy_overclaim": {
+        "coverage_group": "indirect",
+        "definition": "The proxy claim overstates what the concrete artifact can actually prove about the target ability.",
+    },
+    "fake_difficulty": {
+        "coverage_group": "indirect",
+        "definition": "The benchmark looks complex but the real repair or success path is decorative, local, or toy-shaped.",
+    },
+    "non_discriminating_regression": {
+        "coverage_group": "indirect",
+        "definition": "Tests or regressions do not distinguish the intended fix from plausible shallow or semantically wrong fixes.",
+    },
+    "scoring_ambiguity": {
+        "coverage_group": "uncovered",
+        "definition": "Candidate-facing requirements and judge-facing scoring criteria disagree, omit necessary invariants, or require optional/manual/private checks that are not enforced by the concrete artifact.",
+    },
+    "other": {
+        "coverage_group": "uncovered",
+        "definition": "An attack that does not fit the named taxonomy.",
+    },
+}
+
+
 class Adversary:
     role_name = "Adversary"
     system_prompt = (
@@ -923,7 +1185,7 @@ class Adversary:
         "Return JSON only. Do not reveal hidden chain-of-thought."
     )
 
-    def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
+    def __init__(self, client: ModelClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
 
@@ -936,6 +1198,7 @@ class Adversary:
                 "general_probe_principles": self.domain.general_probe_principles,
                 "anti_overfit_policy": self.domain.anti_overfit_policy,
                 "common_rejection_patterns": self.domain.generator_guidance.get("common_rejection_patterns", []),
+                "attack_type_taxonomy": ADVERSARY_ATTACK_TYPE_TAXONOMY,
             },
             "required_json_shape": {
                 "revision_disposition": "pass, revise, or nuke",
@@ -944,7 +1207,7 @@ class Adversary:
                 "attacks": [
                     {
                         "attack_target": "design_premise | implementation | scoring | proxy_claim | leakage | other",
-                        "attack_type": "answer_leakage | cheap_pass | scoring_ambiguity | fake_difficulty | proxy_overclaim | other",
+                        "attack_type": "one attack_type label from attack_surface.attack_type_taxonomy, or other if none fit",
                         "exploit_path": "how a weak evaluated agent or bad grader can exploit the benchmark",
                         "evidence": "specific candidate-facing field/path/span",
                         "severity": "critical | high | medium | low",
@@ -980,7 +1243,7 @@ class _GateValidator:
     system_prompt = ""
     rules_attr = "semantic_rules"
 
-    def __init__(self, client: OpenAIClient, domain: DomainConfig) -> None:
+    def __init__(self, client: ModelClient, domain: DomainConfig) -> None:
         self.client = client
         self.domain = domain
         self._system = self.system_prompt + _format_gate_guidance(domain, self.rules_attr)
@@ -1078,10 +1341,211 @@ class RubricGate(_GateValidator):
     )
 
 
-def _supports_reasoning_effort(model: str) -> bool:
-    normalized = model.lower()
-    return normalized.startswith(("gpt-5", "o1", "o3", "o4"))
+def _load_init_chat_model() -> Any:
+    try:
+        from langchain.chat_models import init_chat_model
+    except ImportError as exc:
+        raise ProviderError(
+            "LangChain chat model support is required. Install langchain and the provider integration package."
+        ) from exc
+    return init_chat_model
 
+
+def _load_init_embeddings() -> Any:
+    try:
+        from langchain.embeddings import init_embeddings
+    except ImportError as exc:
+        raise ProviderError(
+            "LangChain embedding support is required. Install langchain and the embedding provider integration package."
+        ) from exc
+    return init_embeddings
+
+
+def _supports_reasoning_effort(config: ModelConfig) -> bool:
+    provider = _model_provider(config)
+    normalized = config.model.lower()
+    return provider == "openai" and normalized.startswith(
+        ("gpt-5", "o1", "o3", "o4", "openai:gpt-5", "openai:o1", "openai:o3", "openai:o4")
+    )
+
+
+def _supports_temperature(config: ModelConfig) -> bool:
+    provider = _model_provider(config)
+    normalized = config.model.lower()
+    return provider != "openai" or not normalized.startswith(("gpt-5", "openai:gpt-5"))
+
+
+def _model_provider(config: ModelConfig) -> str:
+    if _model_has_provider_prefix(config.model):
+        return config.model.split(":", 1)[0].lower().replace("-", "_")
+    return config.provider.lower().replace("-", "_")
+
+
+def _model_has_provider_prefix(model: str) -> bool:
+    return ":" in model and not model.startswith(("http://", "https://"))
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return None
+
+
+def _jwt_payload(token: str) -> dict[str, Any]:
+    import base64
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((payload + padding).encode("ascii")).decode("utf-8")
+        parsed = json.loads(decoded)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _jwt_expiry(token: str) -> float | None:
+    return _positive_number(_jwt_payload(token).get("exp"))
+
+
+def _extract_codex_account_id(id_token: str) -> str | None:
+    auth_claim = _jwt_payload(id_token).get("https://api.openai.com/auth")
+    if not isinstance(auth_claim, dict):
+        return None
+    return _nonempty_string(auth_claim.get("chatgpt_account_id"))
+
+
+def _sse_payloads(raw: str) -> list[str]:
+    payloads: list[str] = []
+    for frame in raw.replace("\r\n", "\n").split("\n\n"):
+        lines = []
+        for line in frame.split("\n"):
+            if line.startswith("data:"):
+                lines.append(line[5:].strip())
+        payload = "\n".join(lines).strip()
+        if payload and payload != "[DONE]":
+            payloads.append(payload)
+    return payloads
+
+
+def _read_codex_sse(response: Any, *, timeout_seconds: float = 180.0) -> str:
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if time.monotonic() >= deadline:
+            raise ProviderError(f"Codex stream timed out before response.completed after {timeout_seconds:g}s")
+        try:
+            chunk = _read_sse_chunk(response)
+        except IncompleteRead as exc:
+            if exc.partial:
+                chunks.append(exc.partial)
+            raw = b"".join(chunks).decode("utf-8", errors="replace")
+            if _codex_stream_completed(raw):
+                return raw
+            raise ProviderError("Codex stream ended with an incomplete HTTP read before response.completed") from exc
+        if not chunk:
+            raw = b"".join(chunks).decode("utf-8", errors="replace")
+            if raw:
+                return raw
+            raise ProviderError("Codex stream returned an empty response")
+        chunks.append(chunk)
+        raw = b"".join(chunks).decode("utf-8", errors="replace")
+        if _codex_stream_completed(raw):
+            return raw
+
+
+def _read_sse_chunk(response: Any) -> bytes:
+    readline = getattr(response, "readline", None)
+    if callable(readline):
+        return readline()
+    return response.read(65536)
+
+
+def _codex_stream_completed(raw: str) -> bool:
+    return any(
+        '"response.completed"' in payload and '"type"' in payload
+        for payload in _sse_payloads(raw)
+    )
+
+
+def _codex_response_text(response: dict[str, Any]) -> str:
+    output = response.get("output")
+    if not isinstance(output, list):
+        return ""
+    chunks: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text") or part.get("content")
+                if isinstance(text, str):
+                    chunks.append(text)
+    return "".join(chunks)
+
+
+def _local_embedding(text: str, *, dimensions: int = 128) -> list[float]:
+    buckets = [0.0] * dimensions
+    tokens = text.lower().split()
+    if not tokens:
+        return buckets
+    for token in tokens:
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=16).digest()
+        index = int.from_bytes(digest[:4], "big") % dimensions
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        buckets[index] += sign
+    norm = sum(value * value for value in buckets) ** 0.5
+    if norm == 0:
+        return buckets
+    return [value / norm for value in buckets]
+
+
+def _message_text(response: Any) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    chunks.append(text)
+        return "".join(chunks)
+    return str(content)
+
+
+def _usage_metadata(response: Any) -> dict[str, int]:
+    usage = getattr(response, "usage_metadata", None) or {}
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    token_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens") or token_usage.get("prompt_tokens") or token_usage.get("input_tokens") or 0),
+        "output_tokens": int(
+            usage.get("output_tokens") or token_usage.get("completion_tokens") or token_usage.get("output_tokens") or 0
+        ),
+    }
+
+
+def _response_model_name(response: Any) -> str | None:
+    response_metadata = getattr(response, "response_metadata", None) or {}
+    value = response_metadata.get("model_name") or response_metadata.get("model")
+    return str(value) if value else None
 
 
 def _verdict(value: Any) -> Verdict:

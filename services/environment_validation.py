@@ -3,16 +3,21 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
-import sys
 from pathlib import PurePosixPath
 from typing import Any
 
 from config import DomainConfig
 from models import CandidateSample, CheckResult, EvidenceRef, RouteCode
+from services.workspace_executor import run_workspace_test, validate_supported_container_runtime
 from services.virtual_workspace import VirtualWorkspace, VirtualWorkspaceError
 
 
-def validate_environment_artifact(candidate: CandidateSample, domain: DomainConfig) -> CheckResult:
+def validate_environment_artifact(
+    candidate: CandidateSample,
+    domain: DomainConfig,
+    *,
+    workspace_validation_executor: str | None = None,
+) -> CheckResult:
     if domain.domain_id != "benchmark_code_debug":
         return CheckResult(check_id="environment_artifact", passed=True)
 
@@ -30,7 +35,15 @@ def validate_environment_artifact(candidate: CandidateSample, domain: DomainConf
     if not bool(domain.deterministic_rules.get("execute_workspace_tests", False)):
         return CheckResult(check_id="environment_artifact", passed=True)
 
+    runtime_requirements = candidate.agent_artifact.runtime_requirements
+    runtime_error = validate_supported_container_runtime(runtime_requirements)
+    if runtime_error is not None:
+        return CheckResult(check_id="environment_artifact", passed=True)
+
     command = workspace.commands.get("test")
+    runtime_commands = runtime_requirements.get("commands") if isinstance(runtime_requirements, dict) else None
+    if isinstance(runtime_commands, dict) and runtime_commands.get("test") != command:
+        return CheckResult(check_id="environment_artifact", passed=True)
     argv = _safe_test_command_argv(command)
     if argv is None:
         return _failed_environment(
@@ -42,13 +55,12 @@ def validate_environment_artifact(candidate: CandidateSample, domain: DomainConf
     timeout_seconds = float(domain.deterministic_rules.get("workspace_test_timeout_seconds", 10))
     with workspace.materialize() as materialized:
         try:
-            completed = subprocess.run(
-                argv,
-                cwd=materialized.path,
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-                check=False,
+            completed = run_workspace_test(
+                workspace_path=materialized.path,
+                argv=argv,
+                runtime_requirements=runtime_requirements,
+                timeout_seconds=timeout_seconds,
+                executor=workspace_validation_executor,
             )
         except subprocess.TimeoutExpired as exc:
             return _failed_environment(
@@ -57,11 +69,17 @@ def validate_environment_artifact(candidate: CandidateSample, domain: DomainConf
                 "environment_artifact.payload.commands.test",
                 output=_short_command_output(exc.stdout, exc.stderr),
             )
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             return _failed_environment(
                 "workspace_test_command_failed",
                 f"workspace test command could not be executed: {exc}",
                 "environment_artifact.payload.commands.test",
+            )
+        except ValueError as exc:
+            return _failed_environment(
+                "unsupported_runtime_requirements",
+                str(exc),
+                "agent_artifact.runtime_requirements",
             )
 
     if completed.returncode == 1:
@@ -94,7 +112,7 @@ def validate_environment_artifact(candidate: CandidateSample, domain: DomainConf
         )
     return _failed_environment(
         "workspace_test_command_failed",
-        f"workspace test command exited with {completed.returncode}; tests did not run cleanly to assertions",
+        f"workspace test command exited with {completed.returncode}; tests did not run cleanly to assertions via {completed.executor}",
         "environment_artifact.payload.commands.test",
         output=_short_command_output(completed.stdout, completed.stderr),
     )
@@ -115,7 +133,7 @@ def _safe_test_command_argv(command: Any) -> list[str] | None:
     if executable == "pytest":
         return parts
     if executable in {"python", "python3"} and len(parts) >= 3 and parts[1:3] == ["-m", "pytest"]:
-        return [sys.executable, *parts[1:]]
+        return parts
     return None
 
 

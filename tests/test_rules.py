@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from config import load_domain
 from models import CandidateSample, DesignBrief, TaxonomyCell, Verdict
-from rules import deterministic_sample_verdict, validate_design_batch
+from rules import deterministic_sample_verdict as _deterministic_sample_verdict, validate_design_batch
+
+
+def deterministic_sample_verdict(candidate: CandidateSample, domain):
+    return _deterministic_sample_verdict(candidate, domain, workspace_validation_executor="local")
 
 
 def _code_runtime_requirements(**overrides) -> dict:
